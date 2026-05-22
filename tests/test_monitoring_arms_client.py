@@ -152,3 +152,52 @@ def test_call_get_rum_apps_raises_non_retriable(monkeypatch) -> None:
         assert exc.code == UnifiedErrorCode.AUTH_FAILED
     else:  # pragma: no cover
         raise AssertionError("expected MonitoringAdapterError")
+
+
+def test_get_rum_exception_stack_builds_fixed_stack(monkeypatch) -> None:
+    client = _build_client()
+    seen_query: dict[str, object] = {}
+
+    def fake_call_get_rum_exception_stack(query: dict) -> dict:
+        seen_query.update(query)
+        return {"RequestId": "stack-1", "Data": {"Resolved": True}}
+
+    monkeypatch.setattr(client, "_call_get_rum_exception_stack", fake_call_get_rum_exception_stack)
+
+    result = client.get_rum_exception_stack(pid="pid-1", line=245, column=16085)
+
+    assert seen_query["Pid"] == "pid-1"
+    assert seen_query["ExceptionStack"] == "245,16085,20"
+    assert seen_query["SourcemapType"] == "js"
+    assert (
+        seen_query["ExceptionBinaryImages"] == ARMSClient.DEFAULT_EXCEPTION_BINARY_IMAGES
+    )
+    assert result.request_id == "stack-1"
+    assert result.data == {
+        "result": {"Resolved": True},
+        "exception_stack": "245,16085,20",
+    }
+
+
+def test_get_rum_exception_stack_allows_override(monkeypatch) -> None:
+    client = _build_client()
+    seen_query: dict[str, object] = {}
+
+    def fake_call_get_rum_exception_stack(query: dict) -> dict:
+        seen_query.update(query)
+        return {"RequestId": "stack-2"}
+
+    monkeypatch.setattr(client, "_call_get_rum_exception_stack", fake_call_get_rum_exception_stack)
+
+    result = client.get_rum_exception_stack(
+        pid="pid-2",
+        line=1,
+        column=2,
+        sourcemap_type="miniapp",
+        exception_binary_images='{"custom":"yes"}',
+    )
+
+    assert seen_query["ExceptionStack"] == "1,2,20"
+    assert seen_query["SourcemapType"] == "miniapp"
+    assert seen_query["ExceptionBinaryImages"] == '{"custom":"yes"}'
+    assert result.request_id == "stack-2"

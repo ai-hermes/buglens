@@ -44,6 +44,12 @@ class _FakeARMS:
     def get_rum_apps_error(self, **kwargs):
         raise MonitoringAdapterError(code=UnifiedErrorCode.RATE_LIMITED, message="too many")
 
+    def get_rum_exception_stack(self, **kwargs):
+        return AdapterResult(
+            data={"result": {"resolved": True}, "exception_stack": "245,16085,20"},
+            request_id="stack-1",
+        )
+
 
 def test_service_success_envelope() -> None:
     svc = AtomicMonitoringService(sls_client=_FakeSLS(), arms_client=_FakeARMS())
@@ -81,3 +87,11 @@ def test_service_error_envelope() -> None:
     assert result.success is False
     assert result.error is not None
     assert result.error.code == UnifiedErrorCode.RATE_LIMITED
+
+
+def test_service_exception_stack_envelope() -> None:
+    svc = AtomicMonitoringService(sls_client=_FakeSLS(), arms_client=_FakeARMS())
+    result = svc.arms_resolve_exception_stack(pid="pid-1", line=245, column=16085)
+    assert result.success is True
+    assert result.request_id == "stack-1"
+    assert result.data == {"result": {"resolved": True}, "exception_stack": "245,16085,20"}

@@ -702,39 +702,20 @@ class LangGraphRunner:
             payload["query"] = query
             return payload
 
-        def _arms_rum_get_error_context(**kwargs: Any) -> dict[str, Any]:
-            project, logstore = _resolve_rum_sls_target(kwargs)
-            result = monitoring.sls_get_log_context(
-                project=project,
-                logstore=logstore,
-                pack_id=kwargs["pack_id"],
-                pack_meta=kwargs["pack_meta"],
-                back_lines=kwargs.get("back_lines", 30),
-                forward_lines=kwargs.get("forward_lines", 30),
-            )
-            return result.model_dump(mode="json", exclude_none=True)
-
-        def _arms_get_error_detail(**kwargs: Any) -> dict[str, Any]:
-            project, logstore = _resolve_rum_sls_target(kwargs)
-            query_parts: list[str] = []
-            for key in ("app", "page", "version", "error_message"):
-                value = kwargs.get(key)
-                if value:
-                    query_parts.append(str(value))
-            if kwargs.get("query"):
-                query_parts.append(str(kwargs["query"]))
-            query = " and ".join(query_parts) if query_parts else "*"
-            result = monitoring.sls_search_logs(
-                project=project,
-                logstore=logstore,
-                time_from_ms=kwargs["time_from_ms"],
-                time_to_ms=kwargs["time_to_ms"],
-                page_size=kwargs.get("page_size", 20),
-                reverse=True,
-                extra_query={"query": query},
+        def _arms_rum_resolve_exception_stack(**kwargs: Any) -> dict[str, Any]:
+            result = monitoring.arms_resolve_exception_stack(
+                pid=str(kwargs["pid"]),
+                line=int(kwargs["line"]),
+                column=int(kwargs["column"]),
+                sourcemap_type=str(kwargs.get("sourcemap_type", "js")),
+                exception_binary_images=(
+                    str(kwargs["exception_binary_images"])
+                    if kwargs.get("exception_binary_images") is not None
+                    else None
+                ),
             )
             payload = result.model_dump(mode="json", exclude_none=True)
-            payload["query"] = query
+            payload["exception_stack"] = f'{int(kwargs["line"])},{int(kwargs["column"])},20'
             return payload
 
         return [
@@ -775,42 +756,20 @@ class LangGraphRunner:
                 handler=_arms_rum_search_errors,
             ),
             MCPTool(
-                name="arms_rum_get_error_context",
-                description="Get context lines for a RUM error event by pack_id/pack_meta.",
+                name="arms_rum_resolve_exception_stack",
+                description="Resolve frontend exception stack using source map by pid + line + column.",
                 parameters={
                     "type": "object",
                     "properties": {
-                        "project": {"type": "string"},
-                        "logstore": {"type": "string"},
-                        "pack_id": {"type": "string"},
-                        "pack_meta": {"type": "string"},
-                        "back_lines": {"type": "integer"},
-                        "forward_lines": {"type": "integer"},
+                        "pid": {"type": "string"},
+                        "line": {"type": "integer"},
+                        "column": {"type": "integer"},
+                        "sourcemap_type": {"type": "string"},
+                        "exception_binary_images": {"type": "string"},
                     },
-                    "required": ["pack_id", "pack_meta"],
+                    "required": ["pid", "line", "column"],
                 },
-                handler=_arms_rum_get_error_context,
-            ),
-            MCPTool(
-                name="arms_get_error_detail",
-                description="Get frontend error details for ARMS RUM diagnosis (SLS-backed).",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "project": {"type": "string"},
-                        "logstore": {"type": "string"},
-                        "app": {"type": "string"},
-                        "page": {"type": "string"},
-                        "version": {"type": "string"},
-                        "error_message": {"type": "string"},
-                        "query": {"type": "string"},
-                        "time_from_ms": {"type": "integer"},
-                        "time_to_ms": {"type": "integer"},
-                        "page_size": {"type": "integer"},
-                    },
-                    "required": ["time_from_ms", "time_to_ms"],
-                },
-                handler=_arms_get_error_detail,
+                handler=_arms_rum_resolve_exception_stack,
             ),
         ]
 

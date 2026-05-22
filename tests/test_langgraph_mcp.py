@@ -149,8 +149,10 @@ def test_langgraph_monitoring_registry_contains_rum_tools() -> None:
     )
     names = [tool.name for tool in tools]
     assert "arms_rum_list_apps" in names
-    assert "arms_get_error_detail" in names
     assert "arms_rum_search_errors" in names
+    assert "arms_rum_resolve_exception_stack" in names
+    assert "arms_get_error_detail" not in names
+    assert "arms_rum_get_error_context" not in names
     assert "sls_search_logs" not in names
     assert "sls_list_projects" not in names
     assert "arms_search_traces" not in names
@@ -170,6 +172,13 @@ def test_langgraph_monitoring_registry_contains_rum_tools() -> None:
     assert "keyword" in search_props
     assert "query" in search_props
     assert "required" not in search_tool.parameters or search_tool.parameters["required"] == []
+    stack_tool = next(tool for tool in tools if tool.name == "arms_rum_resolve_exception_stack")
+    stack_props = stack_tool.parameters.get("properties", {})
+    assert "pid" in stack_props
+    assert "line" in stack_props
+    assert "column" in stack_props
+    assert "exception_binary_images" in stack_props
+    assert stack_tool.parameters.get("required") == ["pid", "line", "column"]
 
 
 async def test_langgraph_runner_stream_fallback_no_duplicate(monkeypatch) -> None:

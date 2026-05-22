@@ -23,6 +23,10 @@ from buglens.monitoring.schemas.common import (
 
 class ARMSClient:
     """RUM-focused ARMS adapter via OpenAPI (2019-08-08)."""
+    DEFAULT_EXCEPTION_BINARY_IMAGES = (
+        '{"version":"1.0.0","fileName":"index-DXuEeTYs.js.map",'
+        '"uuid":"21be7c88-e56c-4014-b08f-f5b2095dcef1"}'
+    )
 
     def __init__(
         self,
@@ -95,6 +99,39 @@ class ARMSClient:
             next_page_token=next_token,
         )
 
+    def get_rum_exception_stack(
+        self,
+        *,
+        pid: str,
+        line: int,
+        column: int,
+        sourcemap_type: str = "js",
+        exception_binary_images: str | None = None,
+    ) -> AdapterResult:
+        line_int = int(line)
+        column_int = int(column)
+        exception_stack = f"{line_int},{column_int},20"
+        payload = self._call_get_rum_exception_stack(
+            {
+                "Pid": pid,
+                "ExceptionStack": exception_stack,
+                "ExceptionBinaryImages": (
+                    exception_binary_images or self.DEFAULT_EXCEPTION_BINARY_IMAGES
+                ),
+                "RegionId": self._region_id,
+                "SourcemapType": sourcemap_type,
+            }
+        )
+        data = payload.get("Data", payload)
+        normalized_data = data if isinstance(data, dict) else {"value": data}
+        return AdapterResult(
+            data={
+                "result": normalized_data,
+                "exception_stack": exception_stack,
+            },
+            request_id=payload.get("RequestId"),
+        )
+
     def _call_get_rum_apps(self, query: dict[str, Any]) -> dict[str, Any]:
         attempts = self._max_retries + 1
         last_error: MonitoringAdapterError | None = None
@@ -110,6 +147,49 @@ class ARMSClient:
                 #     request.page_size = int(query.get("PageSize", 100))
                 with self._semaphore:
                     resp = self._client.get_rum_apps_with_options(request, self._runtime)
+                payload = self._normalize_api_payload(resp)
+                if not isinstance(payload, dict):
+                    raise MonitoringAdapterError(
+                        code=UnifiedErrorCode.UPSTREAM_ERROR,
+                        message="ARMS response payload must be JSON object",
+                    )
+                return payload
+            except MonitoringAdapterError as exc:
+                last_error = exc
+                if not exc.retriable or idx == attempts - 1:
+                    raise
+                self._backoff_sleep(idx, exc)
+            except Exception as exc:  # noqa: BLE001
+                mapped = self._map_exception(exc)
+                last_error = mapped
+                if not mapped.retriable or idx == attempts - 1:
+                    raise mapped from exc
+                self._backoff_sleep(idx, mapped)
+
+        if last_error:
+            raise last_error
+        raise MonitoringAdapterError(
+            code=UnifiedErrorCode.UPSTREAM_ERROR,
+            message="ARMS request failed unexpectedly",
+        )
+
+    def _call_get_rum_exception_stack(self, query: dict[str, Any]) -> dict[str, Any]:
+        attempts = self._max_retries + 1
+        last_error: MonitoringAdapterError | None = None
+
+        for idx in range(attempts):
+            try:
+                request = arms_models.GetRumExceptionStackRequest()
+                if hasattr(request, "from_map"):
+                    request.from_map(query)
+                else:
+                    request.pid = str(query["Pid"])
+                    request.exception_stack = str(query["ExceptionStack"])
+                    request.exception_binary_images = str(query["ExceptionBinaryImages"])
+                    request.region_id = str(query["RegionId"])
+                    request.sourcemap_type = str(query["SourcemapType"])
+                with self._semaphore:
+                    resp = self._client.get_rum_exception_stack_with_options(request, self._runtime)
                 payload = self._normalize_api_payload(resp)
                 if not isinstance(payload, dict):
                     raise MonitoringAdapterError(

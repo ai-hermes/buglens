@@ -111,6 +111,25 @@ class AtomicMonitoringService:
             )
         )
 
+    def arms_resolve_exception_stack(
+        self,
+        *,
+        pid: str,
+        line: int,
+        column: int,
+        sourcemap_type: str = "js",
+        exception_binary_images: str | None = None,
+    ) -> Envelope:
+        return self._wrap(
+            lambda: self._arms.get_rum_exception_stack(
+                pid=pid,
+                line=line,
+                column=column,
+                sourcemap_type=sourcemap_type,
+                exception_binary_images=exception_binary_images,
+            )
+        )
+
     def _wrap(self, fn):
         started = time.perf_counter()
         try:
