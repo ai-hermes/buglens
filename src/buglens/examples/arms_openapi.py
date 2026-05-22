@@ -1,21 +1,15 @@
 # -*- coding: utf-8 -*-
 # This file is auto-generated, don't edit it. Thanks.
 import os
-import sys
 import json
-
-from typing import List
 
 from alibabacloud_arms20190808.client import Client as ARMS20190808Client
 from alibabacloud_credentials.client import Client as CredentialClient
 from alibabacloud_tea_openapi import models as open_api_models
 from alibabacloud_arms20190808 import models as arms20190808_models
-# from alibabacloud_tea_util import models as util_models
 from darabonba.runtime import RuntimeOptions
-from alibabacloud_tea_util.client import Client as UtilClient
 import asyncio
 from alibabacloud_credentials.models import Config as CredentialConfig
-import os
 from dotenv import load_dotenv
 
 class Sample:
@@ -44,7 +38,7 @@ class Sample:
             credential=credentialsClient
         )
         # Endpoint 请参考 https://api.aliyun.com/product/ARMS
-        config.endpoint = f'arms.cn-hangzhou.aliyuncs.com'
+        config.endpoint = 'arms.cn-hangzhou.aliyuncs.com'
         return ARMS20190808Client(config)
 
 

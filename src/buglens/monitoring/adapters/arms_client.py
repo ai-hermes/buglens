@@ -7,10 +7,11 @@ import threading
 import time
 from typing import Any
 
-from aliyunsdkcore.acs_exception.exceptions import ClientException, ServerException
-from aliyunsdkcore.auth.credentials import StsTokenCredential
-from aliyunsdkcore.client import AcsClient
-from aliyunsdkcore.request import CommonRequest
+from alibabacloud_credentials.client import Client as CredentialClient
+from alibabacloud_credentials.models import Config as CredentialConfig
+from alibabacloud_tea_openapi import models as open_api_models
+from alibabacloud_tea_openapi.client import Client as OpenApiClient
+from darabonba.runtime import RuntimeOptions
 
 from buglens.monitoring.schemas.common import (
     AdapterResult,
@@ -23,7 +24,7 @@ from buglens.monitoring.schemas.common import (
 
 
 class ARMSClient:
-    """Read-only ARMS API adapter (2019-08-08 RPC)."""
+    """Read-only ARMS API adapter via ARMS OpenAPI (2019-08-08)."""
 
     def __init__(
         self,
@@ -40,15 +41,20 @@ class ARMSClient:
         max_backoff_seconds: float = 5.0,
         max_concurrency: int = 4,
     ) -> None:
-        if security_token:
-            credential = StsTokenCredential(access_key_id, access_key_secret, security_token)
-            self._client = AcsClient(region_id=region_id, credential=credential)
-        else:
-            self._client = AcsClient(ak=access_key_id, secret=access_key_secret, region_id=region_id)
+        credentials_config = CredentialConfig(
+            type="sts" if security_token else "access_key",
+            access_key_id=access_key_id,
+            access_key_secret=access_key_secret,
+            security_token=security_token or '',
+        )
+        credentials_client = CredentialClient(credentials_config)
+        config = open_api_models.Config(credential=credentials_client)
+        config.endpoint = endpoint
+        config.read_timeout = read_timeout * 1000
+        config.connect_timeout = connect_timeout * 1000
+        self._client = OpenApiClient(config)
+        self._runtime = RuntimeOptions()
         self._region_id = region_id
-        self._endpoint = endpoint
-        self._read_timeout = read_timeout
-        self._connect_timeout = connect_timeout
         self._max_retries = max_retries
         self._base_backoff = base_backoff_seconds
         self._max_backoff = max_backoff_seconds
@@ -67,7 +73,7 @@ class ARMSClient:
     ) -> AdapterResult:
         token = decode_page_token(page_token)
         page = int(token.get("page", 1))
-        params: dict[str, Any] = {
+        query: dict[str, Any] = {
             "RegionId": self._region_id,
             "StartTime": time_from_ms,
             "EndTime": time_to_ms,
@@ -75,26 +81,30 @@ class ARMSClient:
             "PageSize": max(1, min(page_size, 100)),
         }
         if resource_group_id:
-            params["ResourceGroupId"] = resource_group_id
-        params.update(self._dsl_to_params(filters))
+            query["ResourceGroupId"] = resource_group_id
+        query.update(self._dsl_to_params(filters))
         if extra_params:
-            params.update(extra_params)
+            query.update(extra_params)
 
-        payload = self._call("SearchTraces", params)
+        payload = self._call_action("SearchTraces", query)
         data = payload.get("Data", payload)
         items = data.get("Traces") or data.get("Items") or data.get("List") or []
         total = int(data.get("Total", 0) or 0)
         next_token = None
-        if items and params["PageNumber"] * params["PageSize"] < total:
-            next_token = encode_page_token({"page": params["PageNumber"] + 1})
+        if items and query["PageNumber"] * query["PageSize"] < total:
+            next_token = encode_page_token({"page": query["PageNumber"] + 1})
 
-        return AdapterResult(data={"items": items, "total": total}, request_id=payload.get("RequestId"), next_page_token=next_token)
+        return AdapterResult(
+            data={"items": items, "total": total},
+            request_id=payload.get("RequestId"),
+            next_page_token=next_token,
+        )
 
     def get_trace(self, *, trace_id: str, extra_params: dict[str, Any] | None = None) -> AdapterResult:
-        params: dict[str, Any] = {"RegionId": self._region_id, "TraceID": trace_id}
+        query: dict[str, Any] = {"RegionId": self._region_id, "TraceID": trace_id}
         if extra_params:
-            params.update(extra_params)
-        payload = self._call("GetTrace", params)
+            query.update(extra_params)
+        payload = self._call_action("GetTrace", query)
         data = payload.get("Data", payload)
         return AdapterResult(data=data, request_id=payload.get("RequestId"))
 
@@ -107,33 +117,13 @@ class ARMSClient:
         if not trace_ids:
             return AdapterResult(data={"items": []})
 
-        items: list[dict[str, Any]] = []
-        failures: list[dict[str, Any]] = []
-        request_ids: list[str] = []
-        for trace_id in trace_ids:
-            try:
-                result = self.get_trace(trace_id=trace_id, extra_params=extra_params)
-                if result.request_id:
-                    request_ids.append(result.request_id)
-                if isinstance(result.data, dict):
-                    items.append(result.data)
-                else:
-                    items.append({"trace_id": trace_id, "raw": result.data})
-            except MonitoringAdapterError as exc:
-                failures.append(
-                    {
-                        "trace_id": trace_id,
-                        "code": exc.code.value,
-                        "message": exc.message,
-                        "request_id": exc.request_id,
-                    }
-                )
-
-        return AdapterResult(
-            data={"items": items, "failures": failures},
-            request_id=request_ids[-1] if request_ids else None,
-            partial_success=bool(failures),
-        )
+        query: dict[str, Any] = {"RegionId": self._region_id, "TraceIDs": json.dumps(trace_ids)}
+        if extra_params:
+            query.update(extra_params)
+        payload = self._call_action("GetMultipleTrace", query)
+        data = payload.get("Data", payload)
+        items = data.get("MultiCallChainInfos") or data.get("Items") or []
+        return AdapterResult(data={"items": items, "failures": []}, request_id=payload.get("RequestId"))
 
     def query_metric_by_page(
         self,
@@ -148,7 +138,7 @@ class ARMSClient:
     ) -> AdapterResult:
         token = decode_page_token(page_token)
         page = int(token.get("page", 1))
-        params: dict[str, Any] = {
+        query: dict[str, Any] = {
             "RegionId": self._region_id,
             "Metric": metric,
             "StartTime": time_from_ms,
@@ -156,19 +146,23 @@ class ARMSClient:
             "PageNumber": max(1, page),
             "PageSize": max(1, min(page_size, 200)),
         }
-        params.update(self._dsl_to_params(filters))
+        query.update(self._dsl_to_params(filters))
         if extra_params:
-            params.update(extra_params)
+            query.update(extra_params)
 
-        payload = self._call("QueryMetricByPage", params)
+        payload = self._call_action("QueryMetricByPage", query)
         data = payload.get("Data", payload)
         items = data.get("Items") or data.get("List") or []
         total = int(data.get("Total", 0) or 0)
         next_token = None
-        if items and params["PageNumber"] * params["PageSize"] < total:
-            next_token = encode_page_token({"page": params["PageNumber"] + 1})
+        if items and query["PageNumber"] * query["PageSize"] < total:
+            next_token = encode_page_token({"page": query["PageNumber"] + 1})
 
-        return AdapterResult(data={"items": items, "total": total}, request_id=payload.get("RequestId"), next_page_token=next_token)
+        return AdapterResult(
+            data={"items": items, "total": total},
+            request_id=payload.get("RequestId"),
+            next_page_token=next_token,
+        )
 
     def list_insights_events(
         self,
@@ -182,72 +176,69 @@ class ARMSClient:
     ) -> AdapterResult:
         token = decode_page_token(page_token)
         page = int(token.get("page", 1))
-        params: dict[str, Any] = {
+        query: dict[str, Any] = {
             "RegionId": self._region_id,
             "StartTime": time_from_ms,
             "EndTime": time_to_ms,
             "PageNumber": max(1, page),
             "PageSize": max(1, min(page_size, 100)),
         }
-        params.update(self._dsl_to_params(filters))
+        query.update(self._dsl_to_params(filters))
         if extra_params:
-            params.update(extra_params)
+            query.update(extra_params)
 
-        payload = self._call("ListInsightsEvents", params)
+        payload = self._call_action("ListInsightsEvents", query)
         data = payload.get("Data", payload)
-        items = data.get("Items") or data.get("List") or []
+        items = data.get("InsightsEvents") or data.get("Items") or data.get("List") or []
         total = int(data.get("Total", 0) or 0)
         next_token = None
-        if items and params["PageNumber"] * params["PageSize"] < total:
-            next_token = encode_page_token({"page": params["PageNumber"] + 1})
+        if items and query["PageNumber"] * query["PageSize"] < total:
+            next_token = encode_page_token({"page": query["PageNumber"] + 1})
 
-        return AdapterResult(data={"items": items, "total": total}, request_id=payload.get("RequestId"), next_page_token=next_token)
+        return AdapterResult(
+            data={"items": items, "total": total},
+            request_id=payload.get("RequestId"),
+            next_page_token=next_token,
+        )
 
-    def _call(self, action_name: str, params: dict[str, Any]) -> dict[str, Any]:
-        request = CommonRequest()
-        request.set_accept_format("json")
-        request.set_domain(self._endpoint)
-        request.set_version("2019-08-08")
-        request.set_product("ARMS")
-        request.set_protocol_type("https")
-        request.set_method("POST")
-        request.set_action_name(action_name)
-        request.set_read_timeout(self._read_timeout)
-        request.set_connect_timeout(self._connect_timeout)
-
-        for key, value in params.items():
-            if value is None:
-                continue
-            request.add_query_param(key, value)
-
+    def _call_action(self, action_name: str, query: dict[str, Any]) -> dict[str, Any]:
         attempts = self._max_retries + 1
         last_error: MonitoringAdapterError | None = None
+        params = open_api_models.Params(
+            action=action_name,
+            version="2019-08-08",
+            protocol="HTTPS",
+            method="POST",
+            auth_type="AK",
+            style="V3",
+            pathname="/",
+            req_body_type="json",
+            body_type="json",
+        )
+
         for idx in range(attempts):
             try:
+                request = open_api_models.OpenApiRequest(query=self._normalize_query(query))
                 with self._semaphore:
-                    raw = self._client.do_action_with_exception(request)
-                payload = json.loads(raw.decode("utf-8"))
+                    resp = self._client.call_api(params, request, self._runtime)
+                payload = self._normalize_api_payload(resp)
                 if not isinstance(payload, dict):
                     raise MonitoringAdapterError(
                         code=UnifiedErrorCode.UPSTREAM_ERROR,
                         message="ARMS response payload must be JSON object",
                     )
                 return payload
-            except (ServerException, ClientException) as exc:
-                mapped = self._map_aliyun_error(exc)
+            except MonitoringAdapterError as exc:
+                last_error = exc
+                if not exc.retriable or idx == attempts - 1:
+                    raise
+                self._backoff_sleep(idx, exc)
+            except Exception as exc:  # noqa: BLE001
+                mapped = self._map_exception(exc)
                 last_error = mapped
                 if not mapped.retriable or idx == attempts - 1:
-                    raise mapped
+                    raise mapped from exc
                 self._backoff_sleep(idx, mapped)
-            except TimeoutError as exc:
-                last_error = MonitoringAdapterError(
-                    code=UnifiedErrorCode.TIMEOUT,
-                    message="ARMS request timeout",
-                    retriable=True,
-                )
-                if idx == attempts - 1:
-                    raise last_error from exc
-                self._backoff_sleep(idx, last_error)
 
         if last_error:
             raise last_error
@@ -256,18 +247,76 @@ class ARMSClient:
             message="ARMS request failed unexpectedly",
         )
 
-    def _map_aliyun_error(self, exc: ServerException | ClientException) -> MonitoringAdapterError:
-        code_text = getattr(exc, "error_code", None) or getattr(exc, "get_error_code", lambda: None)()
+    @staticmethod
+    def _normalize_api_payload(resp: Any) -> dict[str, Any]:
+        if hasattr(resp, "to_map"):
+            resp = resp.to_map()
+        if isinstance(resp, dict):
+            body = resp.get("body", resp)
+            if isinstance(body, dict):
+                return body
+            if isinstance(body, str):
+                try:
+                    parsed = json.loads(body)
+                    return parsed if isinstance(parsed, dict) else {"data": parsed}
+                except json.JSONDecodeError:
+                    return {"data": body}
+        if isinstance(resp, str):
+            try:
+                parsed = json.loads(resp)
+                return parsed if isinstance(parsed, dict) else {"data": parsed}
+            except json.JSONDecodeError:
+                return {"data": resp}
+        return {"data": resp}
+
+    @staticmethod
+    def _normalize_query(query: dict[str, Any]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        for key, value in query.items():
+            if value is None:
+                continue
+            if isinstance(value, (dict, list)):
+                normalized[str(key)] = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            else:
+                normalized[str(key)] = str(value)
+        return normalized
+
+    def _map_exception(self, exc: Exception) -> MonitoringAdapterError:
         message = str(exc)
-        request_id = getattr(exc, "request_id", None) or getattr(exc, "get_request_id", lambda: None)()
+        code_text = (
+            getattr(exc, "code", None)
+            or getattr(exc, "error_code", None)
+            or getattr(exc, "get_error_code", lambda: None)()
+        )
+        request_id = (
+            getattr(exc, "request_id", None)
+            or getattr(exc, "requestId", None)
+            or self._extract_request_id_from_message(message)
+        )
         upstream_status = (
-            getattr(exc, "http_status", None)
-            or getattr(exc, "status", None)
+            getattr(exc, "status_code", None)
+            or getattr(exc, "statusCode", None)
+            or getattr(exc, "http_status", None)
             or self._extract_http_status_from_message(message)
         )
+        return self._map_error_meta(
+            code_text=str(code_text) if code_text else None,
+            message=message,
+            request_id=request_id,
+            upstream_status=upstream_status,
+        )
 
+    def _map_error_meta(
+        self,
+        *,
+        code_text: str | None,
+        message: str,
+        request_id: str | None,
+        upstream_status: int | None,
+    ) -> MonitoringAdapterError:
         code_upper = str(code_text or "").upper()
-        if "INVALIDACCESSKEY" in code_upper or "SIGNATURE" in code_upper:
+        message_upper = message.upper()
+        if "INVALIDACCESSKEY" in code_upper or "SIGNATURE" in code_upper or "SIGNATURE" in message_upper:
             code = UnifiedErrorCode.AUTH_FAILED
             retriable = False
         elif "FORBIDDEN" in code_upper or "NOAUTH" in code_upper or "ACCESSDENIED" in code_upper:
@@ -279,7 +328,7 @@ class ARMSClient:
         elif upstream_status in (429, 503):
             code = UnifiedErrorCode.RATE_LIMITED if upstream_status == 429 else UnifiedErrorCode.UPSTREAM_ERROR
             retriable = True
-        elif "TIMEOUT" in code_upper:
+        elif "TIMEOUT" in code_upper or "TIMEOUT" in message_upper:
             code = UnifiedErrorCode.TIMEOUT
             retriable = True
         elif "INVALID" in code_upper or "MISSING" in code_upper:
@@ -287,7 +336,7 @@ class ARMSClient:
             retriable = False
         else:
             code = UnifiedErrorCode.UPSTREAM_ERROR
-            retriable = isinstance(exc, ServerException)
+            retriable = bool(upstream_status and upstream_status >= 500)
 
         return MonitoringAdapterError(
             code=code,
@@ -295,7 +344,7 @@ class ARMSClient:
             request_id=request_id,
             retriable=retriable,
             upstream_status=upstream_status,
-            upstream_code=str(code_text) if code_text else None,
+            upstream_code=code_text,
         )
 
     @staticmethod
@@ -304,6 +353,13 @@ class ARMSClient:
         if not matched:
             return None
         return int(matched.group(1))
+
+    @staticmethod
+    def _extract_request_id_from_message(message: str) -> str | None:
+        matched = re.search(r"RequestID:\s*([A-Za-z0-9-]+)", message, re.IGNORECASE)
+        if not matched:
+            return None
+        return matched.group(1)
 
     def _dsl_to_params(self, filters: AtomicFilterDSL | None) -> dict[str, Any]:
         if not filters:
@@ -326,7 +382,6 @@ class ARMSClient:
             if upper is not None:
                 params["MaxDuration"] = int(upper)
         if filters.tags:
-            # ARMS RPC accepts JSON-like string for mixed tag filters in multiple APIs.
             params["Tags"] = json.dumps(filters.tags, ensure_ascii=True, separators=(",", ":"))
         if filters.level:
             params["Level"] = filters.level

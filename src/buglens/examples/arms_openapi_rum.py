@@ -40,7 +40,7 @@ class Sample:
             credential=credentialsClient
         )
         # Endpoint 请参考 https://api.aliyun.com/product/ARMS
-        config.endpoint = f'arms.cn-hangzhou.aliyuncs.com'
+        config.endpoint = 'arms.cn-hangzhou.aliyuncs.com'
         return OpenApiClient(config)
 
     @staticmethod
@@ -62,7 +62,7 @@ class Sample:
             auth_type='AK',
             style='V3',
             # 接口 PATH,
-            pathname=f'/',
+            pathname='/',
             # 接口请求体内容格式,
             req_body_type='json',
             # 接口响应体内容格式,
