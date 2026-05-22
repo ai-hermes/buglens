@@ -3,7 +3,6 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 
 from .config import bootstrap_process_env_from_dotenv
-from .integrations.arms import ArmsError, get_error_detail, get_related_api
 from .integrations.gitlab import (
     GitLabError,
     cancel_pipeline,
@@ -47,36 +46,6 @@ def _gitlab_wrap(fn, **kwargs):
     try:
         return fn(**kwargs)
     except GitLabError as exc:
-        return {"error": str(exc)}
-
-
-@mcp.tool()
-def arms_get_error_detail(
-    app: str,
-    page: str = "",
-    error_message: str = "",
-    version: str = "",
-    event_url: str = "",
-) -> dict:
-    """Get ARMS RUM error detail with sourcemap location."""
-    try:
-        return get_error_detail(
-            app=app,
-            page=page,
-            error_message=error_message,
-            version=version,
-            event_url=event_url,
-        )
-    except ArmsError as exc:
-        return {"error": str(exc)}
-
-
-@mcp.tool()
-def arms_get_related_api(trace_id: str, app: str) -> dict:
-    """Get ARMS API records around error time by trace id."""
-    try:
-        return get_related_api(trace_id=trace_id, app=app)
-    except ArmsError as exc:
         return {"error": str(exc)}
 
 

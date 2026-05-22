@@ -1,15 +1,15 @@
 # buglens
 
-`buglens` is a Python sub-agent runtime built with `uv`, `pydantic`, `langgraph`, and `claude-code-sdk`.
+`buglens` is a Python sub-agent runtime built with `uv`, `pydantic`, and `langgraph`.
 It runs as a STDIO JSON-RPC server so OpenClaw can spawn it as a child agent process.
-It also provides an MCP server (`buglens-mcp`) for ARMS/GitLab diagnostic tools.
+It also provides an MCP server (`buglens-mcp`) for GitLab diagnostic tools.
+It now includes a read-only monitoring atomic capability layer for Alibaba Cloud ARMS + SLS.
 
 ## Requirements
 
 - Python `3.11+`
 - `uv` installed
-- LiteLLM/OpenAI-compatible endpoint credentials (default runner)
-- Claude CLI/auth environment (only if using `BUGLENS_RUNNER=claude_sdk`)
+- LiteLLM/OpenAI-compatible endpoint credentials
 
 ## Setup
 
@@ -29,7 +29,7 @@ uv run buglens
 Example requests:
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"config":{"model":"claude-sonnet-4-20250514"}}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"config":{"model":"deepseek-v3.2"}}}
 {"jsonrpc":"2.0","id":2,"method":"health","params":{}}
 {"jsonrpc":"2.0","id":3,"method":"invoke","params":{"task":"Summarize this issue","context":{"issue_id":"123"}}}
 {"jsonrpc":"2.0","id":4,"method":"shutdown","params":{}}
@@ -75,13 +75,54 @@ uv run buglens-mcp
 
 Exposed tools:
 
-- `arms_get_error_detail`
-- `arms_get_related_api`
 - GitLab Project/Repo: `gitlab_list_projects`, `gitlab_search_projects`, `gitlab_get_project`, `gitlab_get_file`, `gitlab_list_branches`, `gitlab_get_branch`, `gitlab_find_page_code`, `gitlab_get_commits`
 - GitLab Merge Requests: `gitlab_list_merge_requests`, `gitlab_get_merge_request`, `gitlab_create_merge_request`, `gitlab_update_merge_request`, `gitlab_merge_merge_request`, `gitlab_get_mr_changes`, `gitlab_get_mr_discussions`, `gitlab_create_mr_note`
 - GitLab Issues: `gitlab_list_issues`, `gitlab_get_issue`, `gitlab_create_issue`, `gitlab_update_issue`, `gitlab_create_issue_note`, `gitlab_list_issue_notes`
 - GitLab Pipelines/Jobs: `gitlab_list_pipelines`, `gitlab_get_pipeline`, `gitlab_retry_pipeline`, `gitlab_cancel_pipeline`, `gitlab_list_pipeline_jobs`, `gitlab_get_job_log`
 - GitLab Labels: `gitlab_list_labels`, `gitlab_create_label`, `gitlab_update_label`, `gitlab_delete_label`
+
+LangGraph built-in tools (used by `buglens` runtime):
+
+- GitLab built-ins (gated for GitLab-like tasks)
+- Frontend RUM built-ins (SLS-backed, when Alibaba credentials are present): `arms_rum_search_errors`, `arms_rum_get_error_histogram`, `arms_rum_get_error_context`, `arms_get_error_detail`
+- External MCP tools from `BUGLENS_MCP_SERVERS` (merged with built-ins, external tool names override on conflict)
+
+## Monitoring atomic capability library (SLS + ARMS, read-only MVP)
+
+`buglens.monitoring` provides adapter + service layers for model-side consumption:
+
+- ARMS adapter (`ARMS/2019-08-08` RPC): `search_traces`, `get_trace`, `get_multiple_traces`, `query_metric_by_page`, `list_insights_events`
+- SLS adapter (`Sls/2020-12-30` ROA): `search_logs`, `get_log_context`, `get_log_histogram`, `list_projects`, `list_logstores`
+- Unified service facade (`AtomicMonitoringService`) with unified envelope:
+  - `{success, request_id, latency_ms, data, error, next_page_token, partial_success}`
+  - unified time input/output convention: `epoch_ms`
+  - unified error codes: `AUTH_FAILED | PERMISSION_DENIED | RATE_LIMITED | TIMEOUT | INVALID_PARAM | UPSTREAM_ERROR`
+
+Minimal usage:
+
+```python
+from buglens.monitoring import ARMSClient, SLSClient, AtomicMonitoringService
+
+sls = SLSClient(
+    access_key_id="your-ak",
+    access_key_secret="your-sk",
+    security_token="optional-sts-token",
+    region_id="cn-hangzhou",
+)
+arms = ARMSClient(
+    access_key_id="your-ak",
+    access_key_secret="your-sk",
+    security_token="optional-sts-token",
+    region_id="cn-hangzhou",
+)
+svc = AtomicMonitoringService(sls_client=sls, arms_client=arms)
+result = svc.sls_search_logs(
+    project="proj-demo",
+    logstore="app-logstore",
+    time_from_ms=1700000000000,
+    time_to_ms=1700000900000,
+)
+```
 
 Recommended architecture for your two existing skills:
 
@@ -94,29 +135,38 @@ Recommended architecture for your two existing skills:
 Copy `.env.example` and set fields as needed:
 
 - `BUGLENS_MODEL`
-- `BUGLENS_RUNNER` (default `langgraph`; options: `langgraph`, `claude_sdk`)
+- `BUGLENS_RUNNER` (only `langgraph` is supported)
 - `BUGLENS_LLM_PROVIDER` (default `litellm`)
-- `BUGLENS_ENABLE_MCP_TOOLS` (default `true`; enable built-in ARMS/GitLab MCP tools on `langgraph` runner)
+- `BUGLENS_ENABLE_MCP_TOOLS` (default `true`; enable built-in GitLab + monitoring tools on `langgraph` runner)
 - `BUGLENS_MCP_TOOL_CALL_MAX_STEPS` (default `6`; max auto tool-call rounds per invoke)
-- `BUGLENS_PASS_MODEL_TO_CLI` (default `false`; when `false`, do not pass CLI `--model`, rely on `ANTHROPIC_MODEL` env route)
 - `BUGLENS_SYSTEM_PROMPT`
 - `BUGLENS_MAX_TURNS`
 - `BUGLENS_TIMEOUT_SECONDS`
 - `BUGLENS_FIRST_PACKET_TIMEOUT_SECONDS` (default `30`, fail fast if first SDK packet does not arrive)
 - `BUGLENS_PERMISSION_MODE`
 - `BUGLENS_MOCK_RESPONSE` (optional test-only shortcut)
-- `BUGLENS_ANTHROPIC_AUTH_TOKEN`
-- `BUGLENS_ANTHROPIC_API_KEY` (optional; if absent, falls back to `BUGLENS_ANTHROPIC_AUTH_TOKEN`)
+- `BUGLENS_MCP_SERVERS` (optional JSON object for extra MCP servers; `langgraph` supports `mcpServers.*.url` only)
+- `BUGLENS_ANTHROPIC_AUTH_TOKEN` (optional; fallback for API key)
+- `BUGLENS_ANTHROPIC_API_KEY`
 - `BUGLENS_ANTHROPIC_BASE_URL`
 - `BUGLENS_ANTHROPIC_MODEL`
+- `BUGLENS_ALIBABA_ACCESS_KEY_ID` (required for monitoring built-ins)
+- `BUGLENS_ALIBABA_ACCESS_KEY_SECRET` (required for monitoring built-ins)
+- `BUGLENS_ALIBABA_REGION_ID` (required for monitoring built-ins)
+- `BUGLENS_ALIBABA_SECURITY_TOKEN` (optional STS token)
+- `BUGLENS_ARMS_ENDPOINT` (optional, default `arms.aliyuncs.com`)
+- `BUGLENS_SLS_ENDPOINT` (optional, default `${BUGLENS_ALIBABA_REGION_ID}.log.aliyuncs.com`)
+- `BUGLENS_RUM_SLS_PROJECT` (required default project for `arms_rum_*` tools unless passed per call)
+- `BUGLENS_RUM_SLS_LOGSTORE` (required default logstore for `arms_rum_*` tools unless passed per call)
+- `BUGLENS_MONITORING_MAX_RETRIES` (default `2`)
+- `BUGLENS_MONITORING_BASE_BACKOFF_SECONDS` (default `0.25`)
+- `BUGLENS_MONITORING_MAX_BACKOFF_SECONDS` (default `5.0`)
+- `BUGLENS_MONITORING_MAX_CONCURRENCY` (default `4`)
 
 `buglens` will automatically load `.env` from the current working directory.
 
 Also required by MCP tools:
 
-- `ARMS_ACCESS_KEY_ID`
-- `ARMS_ACCESS_KEY_SECRET`
-- `ARMS_REGION_ID`
 - `GITLAB_URL`
 - `GITLAB_TOKEN`
 - `GITLAB_PROJECT_ID` (optional default; can pass `project_id` per MCP tool call)
@@ -125,6 +175,12 @@ To verify runtime config is applied (without printing secrets), use:
 
 ```bash
 uv run buglens --log-level INFO invoke --task "ping" --stream
+```
+
+Example external MCP registration:
+
+```bash
+export BUGLENS_MCP_SERVERS='{"alibaba_cloud_observability":{"url":"http://localhost:8080"}}'
 ```
 
 ## Development

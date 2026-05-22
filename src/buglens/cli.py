@@ -26,6 +26,9 @@ def _configure_logging(log_level: str) -> None:
         level=getattr(logging, log_level.upper(), logging.WARNING),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Keep transport logs quiet so REPL/invoke diagnostics stay readable.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 async def _run_stdio_loop() -> int:

@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-import json
-import logging
 import os
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-logger = logging.getLogger(__name__)
 
 
 def bootstrap_process_env_from_dotenv(path: str = ".env") -> None:
@@ -52,14 +48,13 @@ class SubAgentConfig(BaseSettings):
 
     name: str = "buglens"
     version: str = "0.1.0"
-    runner: Literal["langgraph", "claude_sdk"] = "langgraph"
+    runner: Literal["langgraph"] = "langgraph"
     llm_provider: Literal["litellm"] = "litellm"
     enable_mcp_tools: bool = True
     mcp_tool_call_max_steps: int = Field(default=6, ge=1, le=30)
-    model: str = "claude-sonnet-4-20250514"
-    pass_model_to_cli: bool = False
+    model: str = "deepseek-v3.2"
     system_prompt: str | None = None
-    max_turns: int = Field(default=6, ge=1, le=30)
+    max_turns: int = Field(default=6, ge=1, le=100)
     timeout_seconds: int = Field(default=180, ge=10, le=3600)
     first_packet_timeout_seconds: int = Field(default=30, ge=1, le=600)
     permission_mode: Literal["default", "acceptEdits", "plan", "bypassPermissions"] = (
@@ -68,23 +63,35 @@ class SubAgentConfig(BaseSettings):
     allowed_tools: list[str] = Field(default_factory=lambda: ["Read", "Write", "Edit", "Bash"])
     mcp_servers: dict[str, Any] = Field(default_factory=dict)
 
-    disable_telemetry: bool = True
-    disable_error_reporting: bool = True
-    disable_nonessential_traffic: bool = True
-    mcp_timeout_ms: int = Field(default=60000, ge=1000)
-    api_timeout_ms: int = Field(default=3000000, ge=1000)
-
     anthropic_auth_token: str | None = None
     anthropic_api_key: str | None = None
     anthropic_base_url: str | None = None
     anthropic_model: str | None = None
-    anthropic_default_haiku_model: str | None = None
-    anthropic_default_opus_model: str | None = None
-    anthropic_default_sonnet_model: str | None = None
-    extra_env: dict[str, str] = Field(default_factory=dict)
+
+    alibaba_access_key_id: str | None = None
+    alibaba_access_key_secret: str | None = None
+    alibaba_security_token: str | None = None
+    alibaba_region_id: str | None = None
+    arms_endpoint: str | None = None
+    sls_endpoint: str | None = None
+    rum_sls_project: str | None = None
+    rum_sls_logstore: str | None = None
+    monitoring_max_retries: int = Field(default=2, ge=0, le=10)
+    monitoring_base_backoff_seconds: float = Field(default=0.25, ge=0.01, le=10.0)
+    monitoring_max_backoff_seconds: float = Field(default=5.0, ge=0.1, le=120.0)
+    monitoring_max_concurrency: int = Field(default=4, ge=1, le=64)
 
     cwd: Path = Field(default_factory=Path.cwd)
     mock_response: str | None = None
+
+    @field_validator("runner", mode="before")
+    @classmethod
+    def _reject_legacy_runner(cls, value: object) -> object:
+        if value == "claude_sdk":
+            raise ValueError(
+                "BUGLENS_RUNNER=claude_sdk is no longer supported; use BUGLENS_RUNNER=langgraph"
+            )
+        return value
 
     def resolve_model(self) -> str:
         return self.anthropic_model or self.model
@@ -100,43 +107,9 @@ class SubAgentConfig(BaseSettings):
             return base
         return f"{base}/chat/completions"
 
-    def build_sdk_env(self) -> dict[str, str]:
-        env: dict[str, str] = {
-            "DISABLE_TELEMETRY": "1" if self.disable_telemetry else "0",
-            "DISABLE_ERROR_REPORTING": "1" if self.disable_error_reporting else "0",
-            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": (
-                "1" if self.disable_nonessential_traffic else "0"
-            ),
-            "MCP_TIMEOUT": str(self.mcp_timeout_ms),
-            "API_TIMEOUT_MS": str(self.api_timeout_ms),
-        }
-        optional_map = {
-            "ANTHROPIC_AUTH_TOKEN": self.anthropic_auth_token,
-            "ANTHROPIC_API_KEY": self.anthropic_api_key or self.anthropic_auth_token,
-            "ANTHROPIC_BASE_URL": self.anthropic_base_url,
-            "ANTHROPIC_MODEL": self.anthropic_model,
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL": self.anthropic_default_haiku_model,
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": self.anthropic_default_opus_model,
-            "ANTHROPIC_DEFAULT_SONNET_MODEL": self.anthropic_default_sonnet_model,
-        }
-        for key, value in optional_map.items():
-            if value:
-                env[key] = value
-        env.update(self.extra_env)
-        if logger.isEnabledFor(logging.DEBUG):
-            redacted_env = {
-                key: (
-                    "***redacted***"
-                    if any(
-                        token in key.upper()
-                        for token in ("TOKEN", "SECRET", "KEY", "AUTH", "PASSWORD")
-                    )
-                    else value
-                )
-                for key, value in env.items()
-            }
-            logger.debug(
-                "build_sdk_env result: %s",
-                json.dumps(redacted_env, ensure_ascii=False, sort_keys=True),
-            )
-        return env
+    def has_monitoring_credentials(self) -> bool:
+        return bool(
+            self.alibaba_access_key_id
+            and self.alibaba_access_key_secret
+            and self.alibaba_region_id
+        )
