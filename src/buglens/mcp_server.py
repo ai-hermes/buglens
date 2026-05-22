@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except ModuleNotFoundError as exc:  # pragma: no cover - exercised in envs without mcp
+    FastMCP = None  # type: ignore[assignment]
+    _MCP_IMPORT_ERROR = exc
+else:
+    _MCP_IMPORT_ERROR = None
 
 from .config import bootstrap_process_env_from_dotenv
 from .integrations.gitlab import (
@@ -39,7 +45,20 @@ from .integrations.gitlab import (
     update_merge_request,
 )
 
-mcp = FastMCP("buglens-mcp")
+class _NoopMCP:
+    def tool(self):
+        def _decorator(fn):
+            return fn
+
+        return _decorator
+
+    def run(self) -> None:
+        raise ModuleNotFoundError(
+            "Missing optional dependency 'mcp'. Install it to run buglens-mcp."
+        ) from _MCP_IMPORT_ERROR
+
+
+mcp = FastMCP("buglens-mcp") if FastMCP is not None else _NoopMCP()
 
 
 def _gitlab_wrap(fn, **kwargs):

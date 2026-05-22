@@ -13,6 +13,7 @@ dependencies = [
     "aliyun-python-sdk-core>=2.16.0",
     "httpx>=0.28.1",
     "langgraph>=0.2.60",
+    "mcp>=1.27.1",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.1",
     "requests>=2.32.5",

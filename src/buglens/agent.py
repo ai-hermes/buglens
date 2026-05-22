@@ -13,6 +13,7 @@ from langgraph.graph import END, StateGraph
 
 from .config import SubAgentConfig
 from .monitoring import ARMSClient, SLSClient, AtomicMonitoringService
+from .monitoring.query_builder import build_rum_search_query, resolve_time_range
 from .mcp_server import (
     gitlab_get_project,
     gitlab_get_file,
@@ -674,17 +675,32 @@ class LangGraphRunner:
 
         def _arms_rum_search_errors(**kwargs: Any) -> dict[str, Any]:
             project, logstore = _resolve_rum_sls_target(kwargs)
+            time_from_ms, time_to_ms = resolve_time_range(
+                from_ms=kwargs.get("time_from_ms"),
+                to_ms=kwargs.get("time_to_ms"),
+                last=kwargs.get("last"),
+            )
+            query = build_rum_search_query(
+                query=kwargs.get("query"),
+                event_type=kwargs.get("event_type", "exception"),
+                app_id=kwargs.get("app_id"),
+                app_types=kwargs.get("app_types"),
+                exception_message=kwargs.get("exception_message"),
+                keyword=kwargs.get("keyword"),
+            )
             result = monitoring.sls_search_logs(
                 project=project,
                 logstore=logstore,
-                time_from_ms=kwargs["time_from_ms"],
-                time_to_ms=kwargs["time_to_ms"],
+                time_from_ms=time_from_ms,
+                time_to_ms=time_to_ms,
                 page_token=kwargs.get("page_token"),
                 page_size=kwargs.get("page_size", 50),
                 reverse=kwargs.get("reverse", True),
-                extra_query={"query": kwargs.get("query", "*")},
+                extra_query={"query": query},
             )
-            return result.model_dump(mode="json", exclude_none=True)
+            payload = result.model_dump(mode="json", exclude_none=True)
+            payload["query"] = query
+            return payload
 
         def _arms_rum_get_error_context(**kwargs: Any) -> dict[str, Any]:
             project, logstore = _resolve_rum_sls_target(kwargs)
@@ -736,20 +752,25 @@ class LangGraphRunner:
             ),
             MCPTool(
                 name="arms_rum_search_errors",
-                description="Search ARMS frontend (RUM) error events from backing SLS logstore.",
+                description="Search ARMS frontend (RUM) errors with structured filters (event_type/app_id/app_types/exception_message) or raw query.",
                 parameters={
                     "type": "object",
                     "properties": {
                         "project": {"type": "string"},
                         "logstore": {"type": "string"},
+                        "last": {"type": "string"},
                         "time_from_ms": {"type": "integer"},
                         "time_to_ms": {"type": "integer"},
                         "query": {"type": "string"},
+                        "event_type": {"type": "string"},
+                        "app_id": {"type": "string"},
+                        "app_types": {"type": "array", "items": {"type": "string"}},
+                        "exception_message": {"type": "string"},
+                        "keyword": {"type": "string"},
                         "page_token": {"type": "string"},
                         "page_size": {"type": "integer"},
                         "reverse": {"type": "boolean"},
                     },
-                    "required": ["time_from_ms", "time_to_ms"],
                 },
                 handler=_arms_rum_search_errors,
             ),

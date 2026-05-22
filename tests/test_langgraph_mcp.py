@@ -160,6 +160,16 @@ def test_langgraph_monitoring_registry_contains_rum_tools() -> None:
     assert "page_token" in properties
     assert "page_size" in properties
     assert "extra_params" not in properties
+    search_tool = next(tool for tool in tools if tool.name == "arms_rum_search_errors")
+    search_props = search_tool.parameters.get("properties", {})
+    assert "last" in search_props
+    assert "event_type" in search_props
+    assert "app_id" in search_props
+    assert "app_types" in search_props
+    assert "exception_message" in search_props
+    assert "keyword" in search_props
+    assert "query" in search_props
+    assert "required" not in search_tool.parameters or search_tool.parameters["required"] == []
 
 
 async def test_langgraph_runner_stream_fallback_no_duplicate(monkeypatch) -> None:

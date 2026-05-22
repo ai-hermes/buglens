@@ -8,6 +8,7 @@ from typing import Any
 
 from buglens.config import SubAgentConfig, bootstrap_process_env_from_dotenv
 from buglens.monitoring import ARMSClient, AtomicMonitoringService, SLSClient
+from buglens.monitoring.query_builder import build_rum_search_query, resolve_time_range
 
 
 def _load_env() -> None:
@@ -79,9 +80,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_search = subparsers.add_parser("search-errors", help="Call arms_rum_search_errors")
     _add_common_project_logstore_flags(p_search)
+    p_search.add_argument(
+        "--last",
+        help="Relative time range, e.g. 15m, 1h, 6h, 24h. Ignored when both --time-from-ms and --time-to-ms are provided.",
+    )
     p_search.add_argument("--time-from-ms", type=int)
     p_search.add_argument("--time-to-ms", type=int)
-    p_search.add_argument("--query", default="*")
+    p_search.add_argument(
+        "--query",
+        help="Raw SLS query override. When set, structured filters below are ignored.",
+    )
+    p_search.add_argument("--event-type", default="exception")
+    p_search.add_argument("--app-id")
+    p_search.add_argument("--app-type", action="append", dest="app_types")
+    p_search.add_argument("--exception-message")
+    p_search.add_argument("--keyword")
     p_search.add_argument("--page-token")
     p_search.add_argument("--page-size", type=int, default=50)
     p_search.add_argument("--reverse", dest="reverse", action="store_true")
@@ -115,6 +128,26 @@ def _resolve_time_range(from_ms: int | None, to_ms: int | None) -> tuple[int, in
     now_ms = int(time.time() * 1000)
     default_from = now_ms - 60 * 60 * 1000
     return from_ms or default_from, to_ms or now_ms
+
+
+def _resolve_time_range_for_search_errors(
+    *,
+    from_ms: int | None,
+    to_ms: int | None,
+    last: str | None,
+) -> tuple[int, int]:
+    return resolve_time_range(from_ms=from_ms, to_ms=to_ms, last=last)
+
+
+def _build_search_errors_query(args: argparse.Namespace) -> str:
+    return build_rum_search_query(
+        query=args.query,
+        event_type=args.event_type,
+        app_id=args.app_id,
+        app_types=args.app_types,
+        exception_message=args.exception_message,
+        keyword=args.keyword,
+    )
 
 
 def _resolve_rum_sls_target(
@@ -151,12 +184,17 @@ def main() -> None:
         return
 
     if args.command == "search-errors":
-        time_from_ms, time_to_ms = _resolve_time_range(args.time_from_ms, args.time_to_ms)
+        time_from_ms, time_to_ms = _resolve_time_range_for_search_errors(
+            from_ms=args.time_from_ms,
+            to_ms=args.time_to_ms,
+            last=args.last,
+        )
         project, logstore = _resolve_rum_sls_target(
             project=args.project,
             logstore=args.logstore,
             config=config,
         )
+        query = _build_search_errors_query(args)
         kwargs = _compact_kwargs(
             {
                 "project": project,
@@ -166,11 +204,13 @@ def main() -> None:
                 "page_token": args.page_token,
                 "page_size": args.page_size,
                 "reverse": args.reverse,
-                "extra_query": {"query": args.query},
+                "extra_query": {"query": query},
             }
         )
         result = monitoring.sls_search_logs(**kwargs)
-        _print_json(result.model_dump(mode="json", exclude_none=True))
+        payload = result.model_dump(mode="json", exclude_none=True)
+        payload["query"] = query
+        _print_json(payload)
         return
 
     if args.command == "get-error-context":
