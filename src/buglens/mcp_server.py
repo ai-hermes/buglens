@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except ModuleNotFoundError as exc:  # pragma: no cover - exercised in envs without mcp
+    FastMCP = None  # type: ignore[assignment]
+    _MCP_IMPORT_ERROR = exc
+else:
+    _MCP_IMPORT_ERROR = None
 
 from .config import bootstrap_process_env_from_dotenv
-from .integrations.arms import ArmsError, get_error_detail, get_related_api
 from .integrations.gitlab import (
     GitLabError,
     cancel_pipeline,
@@ -40,43 +45,26 @@ from .integrations.gitlab import (
     update_merge_request,
 )
 
-mcp = FastMCP("buglens-mcp")
+class _NoopMCP:
+    def tool(self):
+        def _decorator(fn):
+            return fn
+
+        return _decorator
+
+    def run(self) -> None:
+        raise ModuleNotFoundError(
+            "Missing optional dependency 'mcp'. Install it to run buglens-mcp."
+        ) from _MCP_IMPORT_ERROR
+
+
+mcp = FastMCP("buglens-mcp") if FastMCP is not None else _NoopMCP()
 
 
 def _gitlab_wrap(fn, **kwargs):
     try:
         return fn(**kwargs)
     except GitLabError as exc:
-        return {"error": str(exc)}
-
-
-@mcp.tool()
-def arms_get_error_detail(
-    app: str,
-    page: str = "",
-    error_message: str = "",
-    version: str = "",
-    event_url: str = "",
-) -> dict:
-    """Get ARMS RUM error detail with sourcemap location."""
-    try:
-        return get_error_detail(
-            app=app,
-            page=page,
-            error_message=error_message,
-            version=version,
-            event_url=event_url,
-        )
-    except ArmsError as exc:
-        return {"error": str(exc)}
-
-
-@mcp.tool()
-def arms_get_related_api(trace_id: str, app: str) -> dict:
-    """Get ARMS API records around error time by trace id."""
-    try:
-        return get_related_api(trace_id=trace_id, app=app)
-    except ArmsError as exc:
         return {"error": str(exc)}
 
 

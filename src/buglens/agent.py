@@ -1,27 +1,20 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
+import inspect
 import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol, TypedDict
+from typing import Any, Awaitable, Callable, Protocol, TypedDict
 
 import httpx
-from claude_code_sdk import (
-    AssistantMessage,
-    ClaudeCodeOptions,
-    ResultMessage,
-    TextBlock,
-    query,
-)
 from langgraph.graph import END, StateGraph
 
 from .config import SubAgentConfig
+from .monitoring import ARMSClient, SLSClient, AtomicMonitoringService
+from .monitoring.query_builder import build_rum_search_query, resolve_time_range
 from .mcp_server import (
-    arms_get_error_detail,
-    arms_get_related_api,
     gitlab_get_project,
     gitlab_get_file,
     gitlab_list_branches,
@@ -60,16 +53,6 @@ from .models import InvokeRequest, InvokeResponse
 logger = logging.getLogger(__name__)
 
 
-def _safe_serialize(value: object) -> object:
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    if isinstance(value, dict):
-        return {str(k): _safe_serialize(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_safe_serialize(v) for v in value]
-    return str(value)
-
-
 @dataclass
 class AgentMetadata:
     name: str
@@ -87,245 +70,12 @@ class Runner(Protocol):
         ...
 
 
-class ClaudeCodeSDKRunner:
-    async def run(
-        self,
-        request: InvokeRequest,
-        config: SubAgentConfig,
-        on_text: Callable[[str], None] | None = None,
-    ) -> InvokeResponse:
-        if config.mock_response is not None:
-            return InvokeResponse(output=config.mock_response, model=config.resolve_model())
-
-        prompt = request.task
-        if request.context:
-            context_json = json.dumps(request.context, ensure_ascii=False, indent=2)
-            prompt = f"{request.task}\n\nContext:\n{context_json}"
-
-        sdk_env = config.build_sdk_env()
-        cli_model = config.model if config.pass_model_to_cli else None
-        options = ClaudeCodeOptions(
-            model=cli_model,
-            system_prompt=config.system_prompt,
-            max_turns=config.max_turns,
-            allowed_tools=config.allowed_tools,
-            permission_mode=config.permission_mode,
-            cwd=config.cwd,
-            mcp_servers=config.mcp_servers,
-            env=sdk_env,
-        )
-        redacted_env = {
-            key: (
-                "***redacted***"
-                if any(
-                    flag in key.upper()
-                    for flag in ("TOKEN", "SECRET", "KEY", "AUTH", "PASSWORD")
-                )
-                else value
-            )
-            for key, value in sdk_env.items()
-        }
-        options_log_payload = {
-            "runner": "claude_sdk",
-            "model": config.resolve_model(),
-            "cli_model": cli_model,
-            "pass_model_to_cli": config.pass_model_to_cli,
-            "system_prompt": config.system_prompt,
-            "max_turns": config.max_turns,
-            "allowed_tools": config.allowed_tools,
-            "permission_mode": config.permission_mode,
-            "cwd": str(config.cwd),
-            "mcp_servers": config.mcp_servers,
-            "timeout_seconds": config.timeout_seconds,
-            "first_packet_timeout_seconds": config.first_packet_timeout_seconds,
-            "env": redacted_env,
-        }
-        logger.info(
-            "ClaudeCodeSDK options(summary): %s",
-            json.dumps(options_log_payload, ensure_ascii=False, sort_keys=True),
-        )
-        if logger.isEnabledFor(logging.DEBUG):
-            raw_options_payload = {
-                field.name: _safe_serialize(getattr(options, field.name))
-                for field in dataclasses.fields(options)
-            }
-            logger.debug(
-                "ClaudeCodeSDK options(full): %s",
-                json.dumps(raw_options_payload, ensure_ascii=False, sort_keys=True, default=str),
-            )
-
-        session_id: str | None = None
-        usage: dict | None = None
-        raw_result: str | None = None
-        collected_text: list[str] = []
-        message_count = 0
-        text_block_count = 0
-        message_type_counts: dict[str, int] = {}
-        invoke_started_at = time.monotonic()
-        first_message_at: float | None = None
-        first_text_at: float | None = None
-        last_api_error: dict[str, object] | None = None
-
-        logger.info("Claude invoke phase=connect_start")
-
-        def _process_message(message: object) -> None:
-            nonlocal raw_result, usage, session_id, first_message_at, first_text_at
-            nonlocal message_count, text_block_count, last_api_error
-            message_count += 1
-            message_type = type(message).__name__
-            message_type_counts[message_type] = message_type_counts.get(message_type, 0) + 1
-            if first_message_at is None:
-                first_message_at = time.monotonic()
-                logger.info(
-                    "Claude invoke phase=connected elapsed_ms=%d",
-                    int((first_message_at - invoke_started_at) * 1000),
-                )
-
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        text_block_count += 1
-                        collected_text.append(block.text)
-                        if first_text_at is None and block.text:
-                            first_text_at = time.monotonic()
-                            logger.info(
-                                "Claude invoke phase=first_token elapsed_ms=%d",
-                                int((first_text_at - invoke_started_at) * 1000),
-                            )
-                        if on_text is not None and block.text:
-                            on_text(block.text)
-            elif type(message).__name__ == "StreamEvent":
-                event = message.event or {}
-                if event.get("type") == "content_block_delta":
-                    delta = event.get("delta") or {}
-                    if isinstance(delta, dict) and delta.get("type") == "text_delta":
-                        text = str(delta.get("text", ""))
-                        if text:
-                            text_block_count += 1
-                            collected_text.append(text)
-                            if first_text_at is None:
-                                first_text_at = time.monotonic()
-                                logger.info(
-                                    "Claude invoke phase=first_token elapsed_ms=%d",
-                                    int((first_text_at - invoke_started_at) * 1000),
-                                )
-                            if on_text is not None:
-                                on_text(text)
-            elif type(message).__name__ == "SystemMessage":
-                subtype = getattr(message, "subtype", None)
-                data = getattr(message, "data", {}) or {}
-                if subtype == "api_retry":
-                    error = data.get("error")
-                    status = data.get("error_status")
-                    attempt = data.get("attempt")
-                    max_retries = data.get("max_retries")
-                    last_api_error = {
-                        "error": error,
-                        "error_status": status,
-                        "attempt": attempt,
-                        "max_retries": max_retries,
-                    }
-                    logger.warning(
-                        "Claude invoke system api_retry error=%s status=%s attempt=%s/%s",
-                        error,
-                        status,
-                        attempt,
-                        max_retries,
-                    )
-            elif isinstance(message, ResultMessage):
-                raw_result = message.result
-                usage = message.usage
-                session_id = message.session_id
-                logger.debug(
-                    "Received result message session_id=%s is_error=%s",
-                    session_id,
-                    message.is_error,
-                )
-                if message.is_error:
-                    detail = raw_result or "Claude SDK returned an error result"
-                    raise RuntimeError(detail)
-
-        async def _collect() -> None:
-            stream = query(prompt=prompt, options=options)
-            iterator = stream.__aiter__()
-            try:
-                async with asyncio.timeout(config.first_packet_timeout_seconds):
-                    first_message = await iterator.__anext__()
-            except StopAsyncIteration:
-                return
-            except asyncio.TimeoutError as exc:
-                logger.error(
-                    "Claude invoke phase=first_packet_timeout elapsed_ms=%d timeout_seconds=%d",
-                    int((time.monotonic() - invoke_started_at) * 1000),
-                    config.first_packet_timeout_seconds,
-                )
-                raise RuntimeError(
-                    f"Timed out waiting for first packet after "
-                    f"{config.first_packet_timeout_seconds}s"
-                ) from exc
-
-            _process_message(first_message)
-            async for message in iterator:
-                _process_message(message)
-
-        try:
-            async with asyncio.timeout(config.timeout_seconds):
-                await _collect()
-        except asyncio.TimeoutError as exc:
-            elapsed_ms = int((time.monotonic() - invoke_started_at) * 1000)
-            logger.error(
-                "Claude invoke phase=timeout elapsed_ms=%d timeout_seconds=%d first_message_received=%s first_token_received=%s",
-                elapsed_ms,
-                config.timeout_seconds,
-                first_message_at is not None,
-                first_text_at is not None,
-            )
-            if last_api_error is not None:
-                raise RuntimeError(
-                    "Invoke timed out while upstream kept retrying API calls. "
-                    f"last_api_error={json.dumps(last_api_error, ensure_ascii=False)}"
-                ) from exc
-            raise RuntimeError(
-                f"Invoke timed out after {config.timeout_seconds}s (elapsed {elapsed_ms}ms)"
-            ) from exc
-        finally:
-            finished_at = time.monotonic()
-            logger.info(
-                "Claude invoke phase=complete elapsed_ms=%d connect_ms=%s first_token_ms=%s messages=%d text_blocks=%d type_counts=%s",
-                int((finished_at - invoke_started_at) * 1000),
-                (
-                    int((first_message_at - invoke_started_at) * 1000)
-                    if first_message_at is not None
-                    else "n/a"
-                ),
-                (
-                    int((first_text_at - invoke_started_at) * 1000)
-                    if first_text_at is not None
-                    else "n/a"
-                ),
-                message_count,
-                text_block_count,
-                json.dumps(message_type_counts, ensure_ascii=False, sort_keys=True),
-            )
-
-        output = (raw_result or "\n".join(collected_text)).strip()
-        if not output:
-            raise RuntimeError("Claude SDK returned an empty response")
-
-        return InvokeResponse(
-            output=output,
-            model=config.resolve_model(),
-            session_id=session_id,
-            usage=usage,
-            raw_result=raw_result,
-        )
-
-
 class LiteLLMGraphState(TypedDict):
     messages: list[dict[str, Any]]
     output: str
     usage: dict[str, Any] | None
     streamed: bool
+    finish_reason: str | None
 
 
 @dataclass
@@ -333,10 +83,41 @@ class MCPTool:
     name: str
     description: str
     parameters: dict[str, Any]
-    handler: Callable[..., dict[str, Any]]
+    handler: Callable[..., dict[str, Any] | Awaitable[dict[str, Any]]]
 
 
 class LangGraphRunner:
+    _GITLAB_HINT_KEYWORDS = (
+        "gitlab",
+        "merge request",
+        "mr ",
+        "pipeline",
+        "commit",
+        "branch",
+        "issue",
+        "repo",
+        "repository",
+        "project_id",
+        "git ",
+    )
+
+    def _summarize_exception(self, exc: BaseException) -> str:
+        # Python 3.11 ExceptionGroup often wraps the real transport error.
+        if isinstance(exc, BaseExceptionGroup):
+            flattened: list[str] = []
+            stack: list[BaseException] = list(exc.exceptions)
+            while stack:
+                current = stack.pop(0)
+                if isinstance(current, BaseExceptionGroup):
+                    stack = list(current.exceptions) + stack
+                    continue
+                message = str(current).strip() or current.__class__.__name__
+                flattened.append(f"{current.__class__.__name__}: {message}")
+            if flattened:
+                return "; ".join(flattened)
+        message = str(exc).strip() or exc.__class__.__name__
+        return f"{exc.__class__.__name__}: {message}"
+
     def _build_messages(
         self, request: InvokeRequest, config: SubAgentConfig
     ) -> list[dict[str, Any]]:
@@ -351,39 +132,27 @@ class LangGraphRunner:
         messages.append({"role": "user", "content": user_content})
         return messages
 
+    @staticmethod
+    def _debug_preview(value: Any, max_chars: int = 4000) -> str:
+        try:
+            text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except Exception:  # noqa: BLE001
+            text = repr(value)
+        if len(text) <= max_chars:
+            return text
+        return f"{text[:max_chars]}...(truncated)"
+
+    def _should_enable_gitlab_tools(self, request: InvokeRequest) -> bool:
+        task_blob = request.task
+        if request.context:
+            task_blob += "\n" + json.dumps(request.context, ensure_ascii=False)
+        lower = task_blob.lower()
+        return any(keyword in lower for keyword in self._GITLAB_HINT_KEYWORDS)
+
     def _build_mcp_tools(self, config: SubAgentConfig) -> list[MCPTool]:
         if not config.enable_mcp_tools:
             return []
         return [
-            MCPTool(
-                name="arms_get_error_detail",
-                description="Get ARMS RUM error detail with sourcemap location.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "app": {"type": "string"},
-                        "page": {"type": "string"},
-                        "error_message": {"type": "string"},
-                        "version": {"type": "string"},
-                        "event_url": {"type": "string"},
-                    },
-                    "required": ["app"],
-                },
-                handler=arms_get_error_detail,
-            ),
-            MCPTool(
-                name="arms_get_related_api",
-                description="Get ARMS API records around error time by trace id.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "trace_id": {"type": "string"},
-                        "app": {"type": "string"},
-                    },
-                    "required": ["trace_id", "app"],
-                },
-                handler=arms_get_related_api,
-            ),
             MCPTool(
                 name="gitlab_list_projects",
                 description="List accessible GitLab projects.",
@@ -845,6 +614,346 @@ class LangGraphRunner:
             ),
         ]
 
+    def _build_monitoring_service(
+        self,
+        config: SubAgentConfig,
+    ) -> AtomicMonitoringService | None:
+        if not config.has_monitoring_credentials():
+            logger.debug(
+                "LangGraph monitoring tools disabled: missing BUGLENS_ALIBABA_ACCESS_KEY_ID/SECRET/REGION_ID"
+            )
+            return None
+
+        sls = SLSClient(
+            access_key_id=str(config.alibaba_access_key_id),
+            access_key_secret=str(config.alibaba_access_key_secret),
+            security_token=config.alibaba_security_token,
+            region_id=str(config.alibaba_region_id),
+            endpoint=config.sls_endpoint,
+            max_retries=config.monitoring_max_retries,
+            base_backoff_seconds=config.monitoring_base_backoff_seconds,
+            max_backoff_seconds=config.monitoring_max_backoff_seconds,
+            max_concurrency=config.monitoring_max_concurrency,
+        )
+        arms_kwargs: dict[str, Any] = {
+            "access_key_id": str(config.alibaba_access_key_id),
+            "access_key_secret": str(config.alibaba_access_key_secret),
+            "security_token": config.alibaba_security_token,
+            "region_id": str(config.alibaba_region_id),
+            "max_retries": config.monitoring_max_retries,
+            "base_backoff_seconds": config.monitoring_base_backoff_seconds,
+            "max_backoff_seconds": config.monitoring_max_backoff_seconds,
+            "max_concurrency": config.monitoring_max_concurrency,
+        }
+        if config.arms_endpoint:
+            arms_kwargs["endpoint"] = config.arms_endpoint
+        arms = ARMSClient(**arms_kwargs)
+        return AtomicMonitoringService(sls_client=sls, arms_client=arms)
+
+    def _build_monitoring_mcp_tools(self, config: SubAgentConfig) -> list[MCPTool]:
+        if not config.enable_mcp_tools:
+            return []
+        monitoring = self._build_monitoring_service(config)
+        if monitoring is None:
+            return []
+
+        def _arms_rum_list_apps(**kwargs: Any) -> dict[str, Any]:
+            result = monitoring.arms_list_rum_apps(
+                page_token=kwargs.get("page_token"),
+                page_size=kwargs.get("page_size", 100),
+            )
+            return result.model_dump(mode="json", exclude_none=True)
+
+        def _resolve_rum_sls_target(kwargs: dict[str, Any]) -> tuple[str, str]:
+            project = kwargs.get("project") or config.rum_sls_project
+            logstore = kwargs.get("logstore") or config.rum_sls_logstore
+            if not project or not logstore:
+                raise ValueError(
+                    "RUM queries require project/logstore (set params or BUGLENS_RUM_SLS_PROJECT + BUGLENS_RUM_SLS_LOGSTORE)"
+                )
+            return str(project), str(logstore)
+
+        def _arms_rum_search_errors(**kwargs: Any) -> dict[str, Any]:
+            project, logstore = _resolve_rum_sls_target(kwargs)
+            time_from_ms, time_to_ms = resolve_time_range(
+                from_ms=kwargs.get("time_from_ms"),
+                to_ms=kwargs.get("time_to_ms"),
+                last=kwargs.get("last"),
+            )
+            query = build_rum_search_query(
+                query=kwargs.get("query"),
+                event_type=kwargs.get("event_type", "exception"),
+                app_id=kwargs.get("app_id"),
+                app_types=kwargs.get("app_types"),
+                exception_message=kwargs.get("exception_message"),
+                keyword=kwargs.get("keyword"),
+            )
+            result = monitoring.sls_search_logs(
+                project=project,
+                logstore=logstore,
+                time_from_ms=time_from_ms,
+                time_to_ms=time_to_ms,
+                page_token=kwargs.get("page_token"),
+                page_size=kwargs.get("page_size", 50),
+                reverse=kwargs.get("reverse", True),
+                extra_query={"query": query},
+            )
+            payload = result.model_dump(mode="json", exclude_none=True)
+            payload["query"] = query
+            return payload
+
+        def _arms_rum_resolve_exception_stack(**kwargs: Any) -> dict[str, Any]:
+            result = monitoring.arms_resolve_exception_stack(
+                pid=str(kwargs["pid"]),
+                line=int(kwargs["line"]),
+                column=int(kwargs["column"]),
+                sourcemap_type=str(kwargs.get("sourcemap_type", "js")),
+                exception_binary_images=(
+                    str(kwargs["exception_binary_images"])
+                    if kwargs.get("exception_binary_images") is not None
+                    else None
+                ),
+            )
+            payload = result.model_dump(mode="json", exclude_none=True)
+            payload["exception_stack"] = f'{int(kwargs["line"])},{int(kwargs["column"])},20'
+            return payload
+
+        return [
+            MCPTool(
+                name="arms_rum_list_apps",
+                description="List ARMS RUM apps with normalized fields: app_type, description, endpoint, pid, region_id, sls_logstore, sls_project, type.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "page_token": {"type": "string"},
+                        "page_size": {"type": "integer"},
+                    },
+                },
+                handler=_arms_rum_list_apps,
+            ),
+            MCPTool(
+                name="arms_rum_search_errors",
+                description="Search ARMS frontend (RUM) errors with structured filters (event_type/app_id/app_types/exception_message) or raw query.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "project": {"type": "string"},
+                        "logstore": {"type": "string"},
+                        "last": {"type": "string"},
+                        "time_from_ms": {"type": "integer"},
+                        "time_to_ms": {"type": "integer"},
+                        "query": {"type": "string"},
+                        "event_type": {"type": "string"},
+                        "app_id": {"type": "string"},
+                        "app_types": {"type": "array", "items": {"type": "string"}},
+                        "exception_message": {"type": "string"},
+                        "keyword": {"type": "string"},
+                        "page_token": {"type": "string"},
+                        "page_size": {"type": "integer"},
+                        "reverse": {"type": "boolean"},
+                    },
+                },
+                handler=_arms_rum_search_errors,
+            ),
+            MCPTool(
+                name="arms_rum_resolve_exception_stack",
+                description="Resolve frontend exception stack using source map by pid + line + column.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "pid": {"type": "string"},
+                        "line": {"type": "integer"},
+                        "column": {"type": "integer"},
+                        "sourcemap_type": {"type": "string"},
+                        "exception_binary_images": {"type": "string"},
+                    },
+                    "required": ["pid", "line", "column"],
+                },
+                handler=_arms_rum_resolve_exception_stack,
+            ),
+        ]
+
+    async def _discover_external_mcp_tools(self, config: SubAgentConfig) -> list[MCPTool]:
+        if not config.mcp_servers:
+            return []
+
+        discovered: list[MCPTool] = []
+        for server_name, server_config in config.mcp_servers.items():
+            if not isinstance(server_name, str) or not server_name.strip():
+                logger.warning("Skip external MCP server with invalid name: %r", server_name)
+                continue
+            if not isinstance(server_config, dict):
+                logger.warning(
+                    "Skip external MCP server %s: config must be an object",
+                    server_name,
+                )
+                continue
+            url = server_config.get("url")
+            if not isinstance(url, str) or not url.strip():
+                logger.warning(
+                    "Skip external MCP server %s: only url-based config is supported in langgraph",
+                    server_name,
+                )
+                continue
+            try:
+                server_tools = await self._discover_external_mcp_tools_from_url(
+                    server_name=server_name,
+                    server_url=url.strip(),
+                )
+                discovered.extend(server_tools)
+                logger.info(
+                    "LangGraph external MCP discovered server=%s tools=%d",
+                    server_name,
+                    len(server_tools),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "LangGraph external MCP discovery failed server=%s url=%s error=%s",
+                    server_name,
+                    url.strip(),
+                    self._summarize_exception(exc),
+                )
+        return discovered
+
+    async def _discover_external_mcp_tools_from_url(
+        self,
+        server_name: str,
+        server_url: str,
+    ) -> list[MCPTool]:
+        try:
+            from mcp.client.session import ClientSession
+            from mcp.client.streamable_http import streamable_http_client
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"mcp client import failed: {exc}") from exc
+
+        tools: list[MCPTool] = []
+        async with streamable_http_client(server_url) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                cursor: str | None = None
+                while True:
+                    listed = await session.list_tools(cursor=cursor)
+                    for item in listed.tools:
+                        schema = item.inputSchema or {"type": "object", "properties": {}}
+                        if hasattr(schema, "model_dump"):
+                            schema = schema.model_dump(mode="json", exclude_none=True)
+                        if not isinstance(schema, dict):
+                            schema = {"type": "object", "properties": {}}
+                        name = str(item.name or "").strip()
+                        if not name:
+                            continue
+                        description = (
+                            item.description
+                            or item.title
+                            or f"External MCP tool from {server_name}"
+                        )
+                        tools.append(
+                            MCPTool(
+                                name=name,
+                                description=description,
+                                parameters=schema,
+                                handler=self._build_external_mcp_handler(
+                                    server_name=server_name,
+                                    server_url=server_url,
+                                    tool_name=name,
+                                ),
+                            )
+                        )
+                    cursor = listed.nextCursor
+                    if not cursor:
+                        break
+        return tools
+
+    def _build_external_mcp_handler(
+        self,
+        server_name: str,
+        server_url: str,
+        tool_name: str,
+    ) -> Callable[..., Awaitable[dict[str, Any]]]:
+        async def _handler(**arguments: Any) -> dict[str, Any]:
+            return await self._call_external_mcp_tool(
+                server_name=server_name,
+                server_url=server_url,
+                tool_name=tool_name,
+                arguments=arguments,
+            )
+
+        return _handler
+
+    async def _call_external_mcp_tool(
+        self,
+        server_name: str,
+        server_url: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            from mcp.client.session import ClientSession
+            from mcp.client.streamable_http import streamable_http_client
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"mcp client import failed: {exc}") from exc
+
+        async with streamable_http_client(server_url) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                logger.debug(
+                    "LangGraph external_mcp_call_input server=%s tool=%s arguments=%s",
+                    server_name,
+                    tool_name,
+                    self._debug_preview(arguments),
+                )
+                result = await session.call_tool(name=tool_name, arguments=arguments or {})
+                logger.debug(
+                    "LangGraph external_mcp_call_output server=%s tool=%s result=%s",
+                    server_name,
+                    tool_name,
+                    self._debug_preview(result),
+                )
+                return self._normalize_external_mcp_result(
+                    server_name=server_name,
+                    tool_name=tool_name,
+                    result=result,
+                )
+
+    def _normalize_external_mcp_result(
+        self,
+        server_name: str,
+        tool_name: str,
+        result: Any,
+    ) -> dict[str, Any]:
+        def _to_jsonable(value: Any) -> Any:
+            if hasattr(value, "model_dump"):
+                return value.model_dump(mode="json", exclude_none=True)
+            if isinstance(value, dict):
+                return {str(k): _to_jsonable(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [_to_jsonable(v) for v in value]
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                return value
+            return str(value)
+
+        return {
+            "source": "external_mcp",
+            "server": server_name,
+            "tool": tool_name,
+            "is_error": bool(getattr(result, "isError", False)),
+            "structured_content": _to_jsonable(getattr(result, "structuredContent", None)),
+            "content": _to_jsonable(getattr(result, "content", [])),
+        }
+
+    def _merge_mcp_tools(
+        self,
+        builtin_tools: list[MCPTool],
+        external_tools: list[MCPTool],
+    ) -> tuple[list[MCPTool], int]:
+        merged: dict[str, MCPTool] = {tool.name: tool for tool in builtin_tools}
+        overridden = 0
+        for tool in external_tools:
+            if tool.name in merged:
+                overridden += 1
+            merged[tool.name] = tool
+        return list(merged.values()), overridden
+
     def _tool_payload(self, tools: list[MCPTool]) -> list[dict[str, Any]]:
         return [
             {
@@ -887,7 +996,7 @@ class LangGraphRunner:
             payload["tools"] = self._tool_payload(tools)
             payload["tool_choice"] = "auto"
 
-        logger.info(
+        logger.debug(
             "LiteLLM request summary: %s",
             json.dumps(
                 {
@@ -1002,9 +1111,24 @@ class LangGraphRunner:
             arguments = {}
 
         logger.info("LangGraph tool_call_start name=%s call_id=%s", tool_name, call_id)
+        logger.debug(
+            "LangGraph tool_call_input name=%s call_id=%s arguments=%s",
+            tool_name,
+            call_id,
+            self._debug_preview(arguments),
+        )
+        logger.debug(
+            "LangGraph mcp_tool_call_input name=%s call_id=%s arguments=%s",
+            tool_name,
+            call_id,
+            self._debug_preview(arguments),
+        )
         started = time.monotonic()
         try:
-            result = await asyncio.to_thread(tool.handler, **arguments)
+            if inspect.iscoroutinefunction(tool.handler):
+                result = await tool.handler(**arguments)
+            else:
+                result = await asyncio.to_thread(tool.handler, **arguments)
             if not isinstance(result, dict):
                 result = {"result": result}
             elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -1013,6 +1137,18 @@ class LangGraphRunner:
                 tool_name,
                 call_id,
                 elapsed_ms,
+            )
+            logger.debug(
+                "LangGraph tool_call_output name=%s call_id=%s result=%s",
+                tool_name,
+                call_id,
+                self._debug_preview(result),
+            )
+            logger.debug(
+                "LangGraph mcp_tool_call_output name=%s call_id=%s result=%s",
+                tool_name,
+                call_id,
+                self._debug_preview(result),
             )
             return call_id, json.dumps(result, ensure_ascii=False)
         except Exception as exc:
@@ -1023,6 +1159,12 @@ class LangGraphRunner:
                 call_id,
                 elapsed_ms,
                 exc,
+            )
+            logger.debug(
+                "LangGraph tool_call_error_input name=%s call_id=%s arguments=%s",
+                tool_name,
+                call_id,
+                self._debug_preview(arguments),
             )
             return call_id, json.dumps({"error": str(exc)}, ensure_ascii=False)
 
@@ -1036,7 +1178,29 @@ class LangGraphRunner:
             return InvokeResponse(output=config.mock_response, model=config.resolve_model())
 
         messages = self._build_messages(request, config)
-        tools = self._build_mcp_tools(config)
+        gitlab_tools = self._build_mcp_tools(config)
+        if gitlab_tools and not self._should_enable_gitlab_tools(request):
+            logger.debug(
+                "LangGraph tool gating: skip built-in GitLab tools for non-GitLab task"
+            )
+            gitlab_tools = []
+        monitoring_tools = self._build_monitoring_mcp_tools(config)
+        builtin_tools = gitlab_tools + monitoring_tools
+        external_tools = await self._discover_external_mcp_tools(config)
+        tools, overridden_count = self._merge_mcp_tools(builtin_tools, external_tools)
+        logger.info(
+            "LangGraph tools prepared gitlab=%d monitoring=%d builtin=%d external=%d merged=%d overridden=%d",
+            len(gitlab_tools),
+            len(monitoring_tools),
+            len(builtin_tools),
+            len(external_tools),
+            len(tools),
+            overridden_count,
+        )
+        logger.debug(
+            "LangGraph tools prepared names=%s",
+            self._debug_preview([tool.name for tool in tools], max_chars=8000),
+        )
         tool_map = {tool.name: tool for tool in tools}
 
         async def _invoke_node(state: LiteLLMGraphState) -> LiteLLMGraphState:
@@ -1044,7 +1208,9 @@ class LangGraphRunner:
             usage: dict[str, Any] | None = None
             output = ""
             streamed = False
+            finish_reason: str | None = None
             max_steps = min(config.mcp_tool_call_max_steps, config.max_turns)
+            reached_max_steps = True
 
             for step in range(max_steps):
                 data = await self._call_litellm_json(local_messages, config, tools)
@@ -1067,6 +1233,12 @@ class LangGraphRunner:
                     step + 1,
                     len(tool_calls),
                 )
+                if not tool_calls:
+                    logger.debug(
+                        "LangGraph mcp_tool_call_skipped step=%d reason=no_tool_calls assistant_content=%s",
+                        step + 1,
+                        self._debug_preview(assistant_payload.get("content", "")),
+                    )
 
                 if tool_calls and tools:
                     for tool_call in tool_calls:
@@ -1081,17 +1253,39 @@ class LangGraphRunner:
                     continue
 
                 output = assistant_payload["content"].strip()
+                reached_max_steps = False
+                finish_reason = "assistant_response"
                 break
 
             if not output and on_text is not None:
-                output, usage = await self._call_litellm_stream(local_messages, config, on_text)
-                streamed = True
+                try:
+                    output, usage = await self._call_litellm_stream(local_messages, config, on_text)
+                    streamed = True
+                    finish_reason = "stream_fallback"
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("LangGraph stream fallback failed: %s", exc)
+
+            if not output:
+                if reached_max_steps:
+                    finish_reason = "max_tool_steps_reached"
+                    output = (
+                        "No final answer was produced before reaching the max tool-call steps "
+                        f"({max_steps}). Consider increasing BUGLENS_MCP_TOOL_CALL_MAX_STEPS "
+                        "or narrowing the task scope."
+                    )
+                else:
+                    finish_reason = finish_reason or "empty_model_response"
+                    output = (
+                        "No final answer was produced by the model. "
+                        "Please retry with more specific context."
+                    )
 
             return {
                 "messages": local_messages,
                 "output": output,
                 "usage": usage,
                 "streamed": streamed,
+                "finish_reason": finish_reason,
             }
 
         graph = StateGraph(LiteLLMGraphState)
@@ -1104,7 +1298,13 @@ class LangGraphRunner:
         try:
             async with asyncio.timeout(config.timeout_seconds):
                 result = await app.ainvoke(
-                    {"messages": messages, "output": "", "usage": None, "streamed": False}
+                    {
+                        "messages": messages,
+                        "output": "",
+                        "usage": None,
+                        "streamed": False,
+                        "finish_reason": None,
+                    }
                 )
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
@@ -1120,11 +1320,13 @@ class LangGraphRunner:
             ) from exc
 
         elapsed_ms = int((time.monotonic() - started_at) * 1000)
-        logger.info("LangGraph invoke phase=complete elapsed_ms=%d", elapsed_ms)
+        logger.info(
+            "LangGraph invoke phase=complete elapsed_ms=%d finish_reason=%s",
+            elapsed_ms,
+            result.get("finish_reason"),
+        )
 
         output = str(result.get("output", "")).strip()
-        if not output:
-            raise RuntimeError("LangGraph runner returned an empty response")
         if on_text is not None and not result.get("streamed", False):
             on_text(output)
 
@@ -1147,8 +1349,6 @@ class SubAgent:
         self.config = config or SubAgentConfig()
         if runner is not None:
             self.runner = runner
-        elif self.config.runner == "claude_sdk":
-            self.runner = ClaudeCodeSDKRunner()
         else:
             self.runner = LangGraphRunner()
         self.initialized = False
@@ -1158,15 +1358,11 @@ class SubAgent:
             merged = self.config.model_dump()
             merged.update(overrides)
             self.config = SubAgentConfig.model_validate(merged)
-            if self.config.runner == "claude_sdk":
-                self.runner = ClaudeCodeSDKRunner()
-            else:
-                self.runner = LangGraphRunner()
+            self.runner = LangGraphRunner()
         logger.info(
-            "SubAgent initialized runner=%s model=%s pass_model_to_cli=%s anthropic_model=%s base_url_set=%s auth_token_set=%s mock_response_set=%s",
+            "SubAgent initialized runner=%s model=%s anthropic_model=%s base_url_set=%s auth_token_set=%s mock_response_set=%s",
             self.config.runner,
             self.config.model,
-            self.config.pass_model_to_cli,
             self.config.anthropic_model,
             bool(self.config.anthropic_base_url),
             bool(self.config.resolve_api_key()),

@@ -1,17 +1,19 @@
 [project]
 name = "buglens"
 version = "0.1.0"
-description = "Claude sub-agent runtime for OpenClaw-compatible integrations"
+description = "LangGraph sub-agent runtime for OpenClaw-compatible integrations"
 readme = "README.md"
 authors = [
     { name = "丁文江", email = "dingwenjiang@bytedance.com" }
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "alibabacloud-arms20190808==10.0.6",
+    "alibabacloud-openapi-util>=0.2.4",
     "aliyun-python-sdk-core>=2.16.0",
-    "claude-code-sdk>=0.0.25",
     "httpx>=0.28.1",
     "langgraph>=0.2.60",
+    "mcp>=1.27.1",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.1",
     "requests>=2.32.5",
