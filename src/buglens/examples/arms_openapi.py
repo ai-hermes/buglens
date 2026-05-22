@@ -49,27 +49,27 @@ async def main():
     
     runtime = RuntimeOptions()
     try:
-        # # 获取RUM应用列表
-        # get_rum_apps_request = arms20190808_models.GetRumAppsRequest()
-        # resp = client.get_rum_apps_with_options(get_rum_apps_request, runtime)
-        # print("*" * 20)
-        # for item in resp.body.app_list:
-        #     print(item.app_type)
-        #     print(item.description)
-        #     print(item.endpoint)
-        #     print(item.pid)
-        #     print(item.region_id)
-        #     print(item.sls_logstore)
-        #     print(item.sls_project)
-        #     print(item.type)
-        # # print(json.dumps(resp.body, default=str, indent=2))
-        # print("*" * 20)
+        # 获取RUM应用列表
+        get_rum_apps_request = arms20190808_models.GetRumAppsRequest()
+        resp = client.get_rum_apps_with_options(get_rum_apps_request, runtime)
+        print("*" * 20)
+        for item in resp.body.app_list:
+            print(item.app_type)
+            print(item.description)
+            print(item.endpoint)
+            print(item.pid)
+            print(item.region_id)
+            print(item.sls_logstore)
+            print(item.sls_project)
+            print(item.type)
+        # print(json.dumps(resp.body, default=str, indent=2))
+        print("*" * 20)
         
-        get_rum_exception_stack_request = arms20190808_models.GetRumExceptionStackRequest(
-            region_id='cn-hangzhou'
-        )
-        resp = client.get_rum_exception_stack_with_options(get_rum_exception_stack_request, runtime)
-        print(json.dumps(resp, default=str, indent=2))
+        # get_rum_exception_stack_request = arms20190808_models.GetRumExceptionStackRequest(
+        #     region_id='cn-hangzhou'
+        # )
+        # resp = client.get_rum_exception_stack_with_options(get_rum_exception_stack_request, runtime)
+        # print(json.dumps(resp, default=str, indent=2))
     except Exception as error:
         # 此处仅做打印展示，请谨慎对待异常处理，在工程项目中切勿直接忽略异常。
         # 错误 message

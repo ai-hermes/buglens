@@ -660,7 +660,6 @@ class LangGraphRunner:
             result = monitoring.arms_list_rum_apps(
                 page_token=kwargs.get("page_token"),
                 page_size=kwargs.get("page_size", 100),
-                extra_params=kwargs.get("extra_params"),
             )
             return result.model_dump(mode="json", exclude_none=True)
 
@@ -725,13 +724,12 @@ class LangGraphRunner:
         return [
             MCPTool(
                 name="arms_rum_list_apps",
-                description="List ARMS RUM applications and their SLS project/logstore mappings.",
+                description="List ARMS RUM apps with normalized fields: app_type, description, endpoint, pid, region_id, sls_logstore, sls_project, type.",
                 parameters={
                     "type": "object",
                     "properties": {
                         "page_token": {"type": "string"},
                         "page_size": {"type": "integer"},
-                        "extra_params": {"type": "object"},
                     },
                 },
                 handler=_arms_rum_list_apps,

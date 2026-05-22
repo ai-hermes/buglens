@@ -103,13 +103,11 @@ class AtomicMonitoringService:
         *,
         page_token: str | None = None,
         page_size: int = 100,
-        extra_params: dict[str, Any] | None = None,
     ) -> Envelope:
         return self._wrap(
             lambda: self._arms.get_rum_apps(
                 page_token=page_token,
                 page_size=page_size,
-                extra_params=extra_params,
             )
         )
 

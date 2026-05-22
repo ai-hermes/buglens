@@ -31,7 +31,7 @@ class ARMSClient:
         access_key_secret: str,
         region_id: str,
         security_token: str | None = None,
-        endpoint: str = "arms.aliyuncs.com",
+        endpoint: str | None = None,
         read_timeout: int = 10,
         connect_timeout: int = 5,
         max_retries: int = 2,
@@ -39,15 +39,23 @@ class ARMSClient:
         max_backoff_seconds: float = 5.0,
         max_concurrency: int = 4,
     ) -> None:
-        credentials_config = CredentialConfig(
-            type="sts" if security_token else "access_key",
-            access_key_id=access_key_id,
-            access_key_secret=access_key_secret,
-            security_token=security_token or "",
-        )
+        if security_token:
+            credentials_config = CredentialConfig(
+                type="sts",
+                access_key_id=access_key_id,
+                access_key_secret=access_key_secret,
+                security_token=security_token,
+            )
+        else:
+            credentials_config = CredentialConfig(
+                type="access_key",
+                access_key_id=access_key_id,
+                access_key_secret=access_key_secret,
+            )
+            
         credentials_client = CredentialClient(credentials_config)
         config = open_api_models.Config(credential=credentials_client)
-        config.endpoint = endpoint
+        config.endpoint = endpoint or f"arms.{region_id}.aliyuncs.com"
         config.read_timeout = read_timeout * 1000
         config.connect_timeout = connect_timeout * 1000
         self._client = ARMS20190808Client(config)
@@ -63,7 +71,6 @@ class ARMSClient:
         *,
         page_token: str | None = None,
         page_size: int = 100,
-        extra_params: dict[str, Any] | None = None,
     ) -> AdapterResult:
         token = decode_page_token(page_token)
         page = int(token.get("page", 1))
@@ -72,12 +79,11 @@ class ARMSClient:
             "CurrentPage": max(1, page),
             "PageSize": max(1, min(page_size, 100)),
         }
-        if extra_params:
-            query.update(extra_params)
 
         payload = self._call_get_rum_apps(query)
         data = payload.get("Data", payload)
-        items = data.get("AppList") or payload.get("AppList") or []
+        raw_items = data.get("AppList") or payload.get("AppList") or []
+        items = self._normalize_rum_apps(raw_items)
         total = int(data.get("Total", 0) or payload.get("Total", 0) or 0)
         next_token = None
         if items and total and page * query["PageSize"] < total:
@@ -96,12 +102,12 @@ class ARMSClient:
         for idx in range(attempts):
             try:
                 request = arms_models.GetRumAppsRequest()
-                if hasattr(request, "from_map"):
-                    request.from_map(query)
-                else:
-                    request.region_id = str(query.get("RegionId", self._region_id))
-                    request.current_page = int(query.get("CurrentPage", 1))
-                    request.page_size = int(query.get("PageSize", 100))
+                # if hasattr(request, "from_map"):
+                #     request.from_map(query)
+                # else:
+                #     request.region_id = str(query.get("RegionId", self._region_id))
+                #     request.current_page = int(query.get("CurrentPage", 1))
+                #     request.page_size = int(query.get("PageSize", 100))
                 with self._semaphore:
                     resp = self._client.get_rum_apps_with_options(request, self._runtime)
                 payload = self._normalize_api_payload(resp)
@@ -138,7 +144,73 @@ class ARMSClient:
             body = resp.get("body", resp)
             if isinstance(body, dict):
                 return body
+        body_obj = getattr(resp, "body", None)
+        if body_obj is not None:
+            app_list = getattr(body_obj, "app_list", None)
+            total = getattr(body_obj, "total", None)
+            request_id = getattr(body_obj, "request_id", None)
+            payload: dict[str, Any] = {}
+            if app_list is not None:
+                payload["AppList"] = [ARMSClient._rum_app_obj_to_dict(item) for item in app_list]
+            if total is not None:
+                payload["Total"] = total
+            if request_id is not None:
+                payload["RequestId"] = request_id
+            if payload:
+                return payload
         return {"data": resp}
+
+    @staticmethod
+    def _rum_app_obj_to_dict(item: Any) -> dict[str, Any]:
+        if hasattr(item, "to_map"):
+            mapped = item.to_map()
+            if isinstance(mapped, dict):
+                return mapped
+        if isinstance(item, dict):
+            return item
+        return {
+            "AppType": getattr(item, "app_type", None),
+            "Description": getattr(item, "description", None),
+            "Endpoint": getattr(item, "endpoint", None),
+            "Pid": getattr(item, "pid", None),
+            "RegionId": getattr(item, "region_id", None),
+            "SlsLogstore": getattr(item, "sls_logstore", None),
+            "SlsProject": getattr(item, "sls_project", None),
+            "Type": getattr(item, "type", None),
+        }
+
+    @staticmethod
+    def _pick_value(item: dict[str, Any], *keys: str) -> Any:
+        for key in keys:
+            value = item.get(key)
+            if value is not None:
+                return value
+        return None
+
+    @classmethod
+    def _normalize_rum_apps(cls, items: Any) -> list[dict[str, Any]]:
+        if not isinstance(items, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for item in items:
+            item_dict = cls._rum_app_obj_to_dict(item)
+            normalized.append(
+                {
+                    "app_type": cls._pick_value(item_dict, "AppType", "app_type", "appType"),
+                    "description": cls._pick_value(
+                        item_dict, "Description", "description"
+                    ),
+                    "endpoint": cls._pick_value(item_dict, "Endpoint", "endpoint"),
+                    "pid": cls._pick_value(item_dict, "Pid", "pid"),
+                    "region_id": cls._pick_value(item_dict, "RegionId", "region_id"),
+                    "sls_logstore": cls._pick_value(
+                        item_dict, "SlsLogstore", "sls_logstore"
+                    ),
+                    "sls_project": cls._pick_value(item_dict, "SlsProject", "sls_project"),
+                    "type": cls._pick_value(item_dict, "Type", "type"),
+                }
+            )
+        return normalized
 
     @staticmethod
     def _map_exception(exc: Exception) -> MonitoringAdapterError:

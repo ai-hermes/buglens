@@ -23,7 +23,23 @@ class _FakeSLS:
 
 class _FakeARMS:
     def get_rum_apps(self, **kwargs):
-        return AdapterResult(data={"items": [{"pid": "app-1"}]}, request_id="a-1")
+        return AdapterResult(
+            data={
+                "items": [
+                    {
+                        "app_type": "web",
+                        "description": "demo app",
+                        "endpoint": "https://example.local",
+                        "pid": "app-1",
+                        "region_id": "cn-hangzhou",
+                        "sls_logstore": "rum-logstore",
+                        "sls_project": "rum-project",
+                        "type": "rum",
+                    }
+                ]
+            },
+            request_id="a-1",
+        )
 
     def get_rum_apps_error(self, **kwargs):
         raise MonitoringAdapterError(code=UnifiedErrorCode.RATE_LIMITED, message="too many")
@@ -41,7 +57,20 @@ def test_service_partial_success_envelope() -> None:
     svc = AtomicMonitoringService(sls_client=_FakeSLS(), arms_client=_FakeARMS())
     result = svc.arms_list_rum_apps()
     assert result.success is True
-    assert result.data == {"items": [{"pid": "app-1"}]}
+    assert result.data == {
+        "items": [
+            {
+                "app_type": "web",
+                "description": "demo app",
+                "endpoint": "https://example.local",
+                "pid": "app-1",
+                "region_id": "cn-hangzhou",
+                "sls_logstore": "rum-logstore",
+                "sls_project": "rum-project",
+                "type": "rum",
+            }
+        ]
+    }
 
 
 def test_service_error_envelope() -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from buglens.monitoring.adapters.arms_client import ARMSClient
 from buglens.monitoring.schemas.common import MonitoringAdapterError, UnifiedErrorCode
 
@@ -19,7 +21,19 @@ def test_get_rum_apps_maps_and_paginates(monkeypatch) -> None:
         return {
             "RequestId": "req-1",
             "Data": {
-                "AppList": [{"pid": "a"}, {"pid": "b"}],
+                "AppList": [
+                    {
+                        "AppType": "web",
+                        "Description": "app-a",
+                        "Endpoint": "https://example-a",
+                        "Pid": "a",
+                        "RegionId": "cn-hangzhou",
+                        "SlsLogstore": "rum-a",
+                        "SlsProject": "proj-a",
+                        "Type": "rum",
+                    },
+                    {"Pid": "b"},
+                ],
                 "Total": 3,
             },
         }
@@ -30,7 +44,65 @@ def test_get_rum_apps_maps_and_paginates(monkeypatch) -> None:
 
     assert result.request_id == "req-1"
     assert result.data["total"] == 3
+    assert result.data["items"][0] == {
+        "app_type": "web",
+        "description": "app-a",
+        "endpoint": "https://example-a",
+        "pid": "a",
+        "region_id": "cn-hangzhou",
+        "sls_logstore": "rum-a",
+        "sls_project": "proj-a",
+        "type": "rum",
+    }
+    assert result.data["items"][1]["pid"] == "b"
+    assert set(result.data["items"][1].keys()) == {
+        "app_type",
+        "description",
+        "endpoint",
+        "pid",
+        "region_id",
+        "sls_logstore",
+        "sls_project",
+        "type",
+    }
     assert result.next_page_token is not None
+
+
+def test_normalize_api_payload_supports_body_app_list_objects() -> None:
+    resp = SimpleNamespace(
+        body=SimpleNamespace(
+            app_list=[
+                SimpleNamespace(
+                    app_type="web",
+                    description="desc",
+                    endpoint="https://example.local",
+                    pid="pid-1",
+                    region_id="cn-hangzhou",
+                    sls_logstore="logstore-1",
+                    sls_project="project-1",
+                    type="rum",
+                )
+            ],
+            total=1,
+            request_id="req-obj-1",
+        )
+    )
+
+    payload = ARMSClient._normalize_api_payload(resp)  # noqa: SLF001
+    assert payload["RequestId"] == "req-obj-1"
+    assert payload["Total"] == 1
+    assert payload["AppList"] == [
+        {
+            "AppType": "web",
+            "Description": "desc",
+            "Endpoint": "https://example.local",
+            "Pid": "pid-1",
+            "RegionId": "cn-hangzhou",
+            "SlsLogstore": "logstore-1",
+            "SlsProject": "project-1",
+            "Type": "rum",
+        }
+    ]
 
 
 def test_map_exception_503_as_retriable_upstream_error() -> None:

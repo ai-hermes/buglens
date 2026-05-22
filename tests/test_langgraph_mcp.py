@@ -155,6 +155,11 @@ def test_langgraph_monitoring_registry_contains_rum_tools() -> None:
     assert "sls_list_projects" not in names
     assert "arms_search_traces" not in names
     assert "arms_list_insights_events" not in names
+    rum_apps_tool = next(tool for tool in tools if tool.name == "arms_rum_list_apps")
+    properties = rum_apps_tool.parameters.get("properties", {})
+    assert "page_token" in properties
+    assert "page_size" in properties
+    assert "extra_params" not in properties
 
 
 async def test_langgraph_runner_stream_fallback_no_duplicate(monkeypatch) -> None:
