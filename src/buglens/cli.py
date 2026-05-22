@@ -25,6 +25,7 @@ def _configure_logging(log_level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, log_level.upper(), logging.WARNING),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
     )
     # Keep transport logs quiet so REPL/invoke diagnostics stay readable.
     logging.getLogger("httpx").setLevel(logging.WARNING)

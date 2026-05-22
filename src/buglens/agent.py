@@ -12,7 +12,7 @@ import httpx
 from langgraph.graph import END, StateGraph
 
 from .config import SubAgentConfig
-from .monitoring import ARMSClient, SLSClient, AtomicFilterDSL, AtomicMonitoringService
+from .monitoring import ARMSClient, SLSClient, AtomicMonitoringService
 from .mcp_server import (
     gitlab_get_project,
     gitlab_get_file,
@@ -130,6 +130,16 @@ class LangGraphRunner:
             user_content = request.task
         messages.append({"role": "user", "content": user_content})
         return messages
+
+    @staticmethod
+    def _debug_preview(value: Any, max_chars: int = 4000) -> str:
+        try:
+            text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except Exception:  # noqa: BLE001
+            text = repr(value)
+        if len(text) <= max_chars:
+            return text
+        return f"{text[:max_chars]}...(truncated)"
 
     def _should_enable_gitlab_tools(self, request: InvokeRequest) -> bool:
         task_blob = request.task
@@ -639,21 +649,20 @@ class LangGraphRunner:
         arms = ARMSClient(**arms_kwargs)
         return AtomicMonitoringService(sls_client=sls, arms_client=arms)
 
-    def _normalize_atomic_filters(self, filters: Any) -> AtomicFilterDSL | None:
-        if filters is None:
-            return None
-        if isinstance(filters, AtomicFilterDSL):
-            return filters
-        if not isinstance(filters, dict):
-            raise ValueError("filters must be an object")
-        return AtomicFilterDSL.model_validate(filters)
-
     def _build_monitoring_mcp_tools(self, config: SubAgentConfig) -> list[MCPTool]:
         if not config.enable_mcp_tools:
             return []
         monitoring = self._build_monitoring_service(config)
         if monitoring is None:
             return []
+
+        def _arms_rum_list_apps(**kwargs: Any) -> dict[str, Any]:
+            result = monitoring.arms_list_rum_apps(
+                page_token=kwargs.get("page_token"),
+                page_size=kwargs.get("page_size", 100),
+                extra_params=kwargs.get("extra_params"),
+            )
+            return result.model_dump(mode="json", exclude_none=True)
 
         def _resolve_rum_sls_target(kwargs: dict[str, Any]) -> tuple[str, str]:
             project = kwargs.get("project") or config.rum_sls_project
@@ -674,17 +683,6 @@ class LangGraphRunner:
                 page_token=kwargs.get("page_token"),
                 page_size=kwargs.get("page_size", 50),
                 reverse=kwargs.get("reverse", True),
-                extra_query={"query": kwargs.get("query", "*")},
-            )
-            return result.model_dump(mode="json", exclude_none=True)
-
-        def _arms_rum_get_error_histogram(**kwargs: Any) -> dict[str, Any]:
-            project, logstore = _resolve_rum_sls_target(kwargs)
-            result = monitoring.sls_get_log_histogram(
-                project=project,
-                logstore=logstore,
-                time_from_ms=kwargs["time_from_ms"],
-                time_to_ms=kwargs["time_to_ms"],
                 extra_query={"query": kwargs.get("query", "*")},
             )
             return result.model_dump(mode="json", exclude_none=True)
@@ -726,6 +724,19 @@ class LangGraphRunner:
 
         return [
             MCPTool(
+                name="arms_rum_list_apps",
+                description="List ARMS RUM applications and their SLS project/logstore mappings.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "page_token": {"type": "string"},
+                        "page_size": {"type": "integer"},
+                        "extra_params": {"type": "object"},
+                    },
+                },
+                handler=_arms_rum_list_apps,
+            ),
+            MCPTool(
                 name="arms_rum_search_errors",
                 description="Search ARMS frontend (RUM) error events from backing SLS logstore.",
                 parameters={
@@ -743,22 +754,6 @@ class LangGraphRunner:
                     "required": ["time_from_ms", "time_to_ms"],
                 },
                 handler=_arms_rum_search_errors,
-            ),
-            MCPTool(
-                name="arms_rum_get_error_histogram",
-                description="Get ARMS frontend (RUM) error histogram from backing SLS logstore.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "project": {"type": "string"},
-                        "logstore": {"type": "string"},
-                        "time_from_ms": {"type": "integer"},
-                        "time_to_ms": {"type": "integer"},
-                        "query": {"type": "string"},
-                    },
-                    "required": ["time_from_ms", "time_to_ms"],
-                },
-                handler=_arms_rum_get_error_histogram,
             ),
             MCPTool(
                 name="arms_rum_get_error_context",
@@ -923,7 +918,19 @@ class LangGraphRunner:
         async with streamable_http_client(server_url) as (read_stream, write_stream, _):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
+                logger.debug(
+                    "LangGraph external_mcp_call_input server=%s tool=%s arguments=%s",
+                    server_name,
+                    tool_name,
+                    self._debug_preview(arguments),
+                )
                 result = await session.call_tool(name=tool_name, arguments=arguments or {})
+                logger.debug(
+                    "LangGraph external_mcp_call_output server=%s tool=%s result=%s",
+                    server_name,
+                    tool_name,
+                    self._debug_preview(result),
+                )
                 return self._normalize_external_mcp_result(
                     server_name=server_name,
                     tool_name=tool_name,
@@ -1126,6 +1133,18 @@ class LangGraphRunner:
             arguments = {}
 
         logger.info("LangGraph tool_call_start name=%s call_id=%s", tool_name, call_id)
+        logger.debug(
+            "LangGraph tool_call_input name=%s call_id=%s arguments=%s",
+            tool_name,
+            call_id,
+            self._debug_preview(arguments),
+        )
+        logger.debug(
+            "LangGraph mcp_tool_call_input name=%s call_id=%s arguments=%s",
+            tool_name,
+            call_id,
+            self._debug_preview(arguments),
+        )
         started = time.monotonic()
         try:
             if inspect.iscoroutinefunction(tool.handler):
@@ -1141,6 +1160,18 @@ class LangGraphRunner:
                 call_id,
                 elapsed_ms,
             )
+            logger.debug(
+                "LangGraph tool_call_output name=%s call_id=%s result=%s",
+                tool_name,
+                call_id,
+                self._debug_preview(result),
+            )
+            logger.debug(
+                "LangGraph mcp_tool_call_output name=%s call_id=%s result=%s",
+                tool_name,
+                call_id,
+                self._debug_preview(result),
+            )
             return call_id, json.dumps(result, ensure_ascii=False)
         except Exception as exc:
             elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -1150,6 +1181,12 @@ class LangGraphRunner:
                 call_id,
                 elapsed_ms,
                 exc,
+            )
+            logger.debug(
+                "LangGraph tool_call_error_input name=%s call_id=%s arguments=%s",
+                tool_name,
+                call_id,
+                self._debug_preview(arguments),
             )
             return call_id, json.dumps({"error": str(exc)}, ensure_ascii=False)
 
@@ -1181,6 +1218,10 @@ class LangGraphRunner:
             len(external_tools),
             len(tools),
             overridden_count,
+        )
+        logger.debug(
+            "LangGraph tools prepared names=%s",
+            self._debug_preview([tool.name for tool in tools], max_chars=8000),
         )
         tool_map = {tool.name: tool for tool in tools}
 
@@ -1214,6 +1255,12 @@ class LangGraphRunner:
                     step + 1,
                     len(tool_calls),
                 )
+                if not tool_calls:
+                    logger.debug(
+                        "LangGraph mcp_tool_call_skipped step=%d reason=no_tool_calls assistant_content=%s",
+                        step + 1,
+                        self._debug_preview(assistant_payload.get("content", "")),
+                    )
 
                 if tool_calls and tools:
                     for tool_call in tool_calls:

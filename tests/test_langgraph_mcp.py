@@ -148,6 +148,7 @@ def test_langgraph_monitoring_registry_contains_rum_tools() -> None:
         )
     )
     names = [tool.name for tool in tools]
+    assert "arms_rum_list_apps" in names
     assert "arms_get_error_detail" in names
     assert "arms_rum_search_errors" in names
     assert "sls_search_logs" not in names

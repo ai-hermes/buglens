@@ -5,16 +5,11 @@
 Use a hybrid model:
 
 - **Skill**: orchestration only (intent parsing, diagnosis narrative, issue template generation).
-- **MCP**: all executable integrations (ARMS/GitLab API calls).
+- **MCP**: executable integrations.
 
 This is better than pure Skill-script mode because tool interfaces become stable and reusable across agents.
 
 ## Mapping from existing skills
-
-`arms-rum-diagnosis`:
-
-- `tools/get_error_detail.py` -> `arms_get_error_detail`
-- `tools/get_related_api.py` -> `arms_get_related_api`
 
 `gitlab-frontend`:
 
@@ -26,24 +21,8 @@ This is better than pure Skill-script mode because tool interfaces become stable
 
 ## Minimal SKILL.md adaptation pattern
 
-Replace shell command blocks like:
-
-```bash
-python {baseDir}/tools/get_error_detail.py --app "<app>" ...
-```
-
-with tool instructions like:
-
-```md
-Call MCP tool `arms_get_error_detail` with:
-- app
-- page
-- error_message
-- version
-- event_url
-```
-
-Do this for all 5 tools above.
+Replace local shell command blocks with MCP tool instructions.
+For ARMS diagnostics, call your external MCP server tools directly.
 
 ## Runtime
 

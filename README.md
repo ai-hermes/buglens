@@ -84,15 +84,15 @@ Exposed tools:
 LangGraph built-in tools (used by `buglens` runtime):
 
 - GitLab built-ins (gated for GitLab-like tasks)
-- Frontend RUM built-ins (SLS-backed, when Alibaba credentials are present): `arms_rum_search_errors`, `arms_rum_get_error_histogram`, `arms_rum_get_error_context`, `arms_get_error_detail`
+- Frontend RUM built-ins (when Alibaba credentials are present): `arms_rum_list_apps`, `arms_rum_search_errors`, `arms_rum_get_error_context`, `arms_get_error_detail`
 - External MCP tools from `BUGLENS_MCP_SERVERS` (merged with built-ins, external tool names override on conflict)
 
-## Monitoring atomic capability library (SLS + ARMS, read-only MVP)
+## Monitoring atomic capability library (RUM-focused)
 
 `buglens.monitoring` provides adapter + service layers for model-side consumption:
 
-- ARMS adapter (`ARMS/2019-08-08` RPC): `search_traces`, `get_trace`, `get_multiple_traces`, `query_metric_by_page`, `list_insights_events`
-- SLS adapter (`Sls/2020-12-30` ROA): `search_logs`, `get_log_context`, `get_log_histogram`, `list_projects`, `list_logstores`
+- ARMS adapter (`ARMS/2019-08-08` OpenAPI): `get_rum_apps`
+- RUM query adapter (OpenAPI-backed): `search_logs`, `get_log_context`, `get_log_histogram`, `list_projects`, `list_logstores`
 - Unified service facade (`AtomicMonitoringService`) with unified envelope:
   - `{success, request_id, latency_ms, data, error, next_page_token, partial_success}`
   - unified time input/output convention: `epoch_ms`
