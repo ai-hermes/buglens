@@ -25,7 +25,7 @@ def test_skill_export_cli_success(tmp_path: Path) -> None:
     proc = _run_export(output)
 
     assert proc.returncode == 0, proc.stderr
-    assert "exported skills: buglens" in proc.stdout
+    assert "exported skill: buglens" in proc.stdout
     assert "openclaw skills install" in proc.stdout
     assert (output / "manifest.json").exists()
 

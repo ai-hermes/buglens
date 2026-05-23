@@ -13,7 +13,7 @@ from .agent import SubAgent
 from .config import bootstrap_process_env_from_dotenv
 from .models import InvokeRequest
 from .rpc import build_error, dispatch_request
-from .skills import export_skills, list_template_skills
+from .skills import export_skill
 
 logger = logging.getLogger(__name__)
 
@@ -239,14 +239,7 @@ def main() -> None:
     skills_export_parser.add_argument(
         "--output",
         default="./dist/openclaw-skills",
-        help="target directory for exported skills",
-    )
-    skills_export_parser.add_argument(
-        "--skill",
-        action="append",
-        dest="skills",
-        default=None,
-        help="skill name to export (repeatable); defaults to all packaged skills",
+        help="target directory for exported buglens skill",
     )
     skills_export_parser.add_argument(
         "--overwrite",
@@ -274,20 +267,16 @@ def main() -> None:
         if args.skills_mode != "export":
             raise SystemExit("missing skills subcommand, expected: export")
         try:
-            result = export_skills(
+            result = export_skill(
                 output_dir=Path(args.output),
-                selected_skills=args.skills,
                 overwrite=args.overwrite,
             )
         except Exception as exc:
             raise SystemExit(f"skills export failed: {exc}") from exc
 
-        print(f"exported skills: {', '.join(result.exported_skills)}")
+        print(f"exported skill: {result.exported_skill}")
         print(f"output dir: {result.output_dir}")
-        for skill_name in result.exported_skills:
-            print(f"openclaw skills install {result.output_dir / skill_name}")
-        available = ", ".join(list_template_skills())
-        print(f"available packaged skills: {available}")
+        print(f"openclaw skills install {result.output_dir / result.exported_skill}")
         raise SystemExit(0)
     raise SystemExit(asyncio.run(_run_stdio_loop()))
 

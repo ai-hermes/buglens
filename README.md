@@ -145,7 +145,7 @@ result = svc.sls_search_logs(
 )
 ```
 
-Recommended architecture for your two existing skills:
+Recommended architecture for the single external `buglens` skill:
 
 - Keep Skill as orchestration/prompt layer (parse alert card, generate report text).
 - Move executable capability to MCP tools (this repo now provides those tools).

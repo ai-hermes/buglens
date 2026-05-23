@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from buglens.skills import export_skills
+from buglens.skills import export_skill
 
 
 def _frontmatter(path: Path) -> str:
@@ -36,9 +36,9 @@ def test_buglens_skill_has_codex_ui_metadata() -> None:
 
 def test_export_skills_writes_expected_layout(tmp_path: Path) -> None:
     output = tmp_path / "openclaw-skills"
-    result = export_skills(output_dir=output)
+    result = export_skill(output_dir=output)
 
-    assert result.exported_skills == ["buglens"]
+    assert result.exported_skill == "buglens"
     assert (output / "manifest.json").exists()
     assert (output / "buglens" / "SKILL.md").exists()
     assert (output / "buglens" / "agents" / "openai.yaml").exists()
