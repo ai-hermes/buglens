@@ -6,12 +6,14 @@ import json
 import logging
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from .agent import SubAgent
 from .config import bootstrap_process_env_from_dotenv
 from .models import InvokeRequest
 from .rpc import build_error, dispatch_request
+from .skills import export_skills, list_template_skills
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +230,30 @@ def main() -> None:
         help="stream assistant text output in REPL invoke",
     )
 
+    skills_parser = sub.add_parser("skills", help="skill packaging helpers")
+    skills_sub = skills_parser.add_subparsers(dest="skills_mode")
+    skills_export_parser = skills_sub.add_parser(
+        "export",
+        help="export packaged skill templates for local distribution",
+    )
+    skills_export_parser.add_argument(
+        "--output",
+        default="./dist/openclaw-skills",
+        help="target directory for exported skills",
+    )
+    skills_export_parser.add_argument(
+        "--skill",
+        action="append",
+        dest="skills",
+        default=None,
+        help="skill name to export (repeatable); defaults to all packaged skills",
+    )
+    skills_export_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace existing target skill directories",
+    )
+
     args = parser.parse_args()
     _configure_logging(args.log_level)
     if args.mode == "invoke":
@@ -244,6 +270,25 @@ def main() -> None:
         )
     if args.mode == "repl":
         raise SystemExit(asyncio.run(_run_repl(args.mock_response, args.stream)))
+    if args.mode == "skills":
+        if args.skills_mode != "export":
+            raise SystemExit("missing skills subcommand, expected: export")
+        try:
+            result = export_skills(
+                output_dir=Path(args.output),
+                selected_skills=args.skills,
+                overwrite=args.overwrite,
+            )
+        except Exception as exc:
+            raise SystemExit(f"skills export failed: {exc}") from exc
+
+        print(f"exported skills: {', '.join(result.exported_skills)}")
+        print(f"output dir: {result.output_dir}")
+        for skill_name in result.exported_skills:
+            print(f"openclaw skills install {result.output_dir / skill_name}")
+        available = ", ".join(list_template_skills())
+        print(f"available packaged skills: {available}")
+        raise SystemExit(0)
     raise SystemExit(asyncio.run(_run_stdio_loop()))
 
 

@@ -65,6 +65,27 @@ Expected methods:
 - `invoke`
 - `shutdown`
 
+## Skill mode (Codex + OpenClaw)
+
+This repo now ships a unified `buglens` skill package under `skills/buglens`:
+
+- `SKILL.md`: orchestration contract (frontend incident diagnosis -> GitLab issue workflow)
+- `agents/openai.yaml`: Codex-facing UI metadata (`display_name`, `short_description`, `default_prompt`)
+
+Export local distribution artifacts:
+
+```bash
+uv run buglens skills export --output ./dist/openclaw-skills
+```
+
+Install into OpenClaw from local directory:
+
+```bash
+openclaw skills install ./dist/openclaw-skills/buglens
+```
+
+Codex can also consume the same folder as a project/local skill source in environments where local skill directories are enabled.
+
 ## MCP tools (recommended integration backbone)
 
 Run MCP server:
