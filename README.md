@@ -102,6 +102,26 @@ Run MCP server:
 uv run buglens-mcp
 ```
 
+Run MCP server in streamable HTTP mode (recommended for remote/tool URL integration):
+
+```bash
+uv run buglens-mcp --transport streamable-http --host 0.0.0.0 --port 8000
+```
+
+Default streamable endpoint URL: `http://127.0.0.1:8000/mcp`
+
+If connecting from another machine and you hit `Invalid Host header`, add either:
+
+```bash
+uv run buglens-mcp --transport streamable-http --host 0.0.0.0 --port 8000 --allow-host 10.37.25.80:*
+```
+
+or (LAN testing):
+
+```bash
+uv run buglens-mcp --transport streamable-http --host 0.0.0.0 --port 8000 --disable-dns-rebinding-protection
+```
+
 Exposed tools:
 
 - GitLab Project/Repo: `gitlab_list_projects`, `gitlab_search_projects`, `gitlab_get_project`, `gitlab_get_file`, `gitlab_list_branches`, `gitlab_get_branch`, `gitlab_find_page_code`, `gitlab_get_commits`

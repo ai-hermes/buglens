@@ -114,7 +114,7 @@ def _write_bundle_install_md(bundle_dir: Path, wheel_name: str) -> Path:
                 "## 2) Start MCP runtime",
                 "",
                 "```bash",
-                "buglens-mcp",
+                "buglens-mcp --transport streamable-http --host 0.0.0.0 --port 8000",
                 "```",
                 "",
                 "## 3) Install skill",
@@ -130,6 +130,7 @@ def _write_bundle_install_md(bundle_dir: Path, wheel_name: str) -> Path:
                 "## 4) Configure MCP",
                 "",
                 "Use `configs/openclaw-mcp.json` and `configs/codex-mcp.json` as templates.",
+                "Default endpoint is `http://127.0.0.1:8000/mcp`.",
                 "",
                 "## 5) Required env vars",
                 "",
@@ -154,25 +155,14 @@ def _write_mcp_templates(bundle_dir: Path) -> None:
     openclaw_mcp = {
         "mcpServers": {
             "buglens": {
-                "command": "buglens-mcp",
-                "env": {
-                    "GITLAB_URL": "${GITLAB_URL}",
-                    "GITLAB_TOKEN": "${GITLAB_TOKEN}",
-                    "BUGLENS_ALIBABA_ACCESS_KEY_ID": "${BUGLENS_ALIBABA_ACCESS_KEY_ID}",
-                    "BUGLENS_ALIBABA_ACCESS_KEY_SECRET": "${BUGLENS_ALIBABA_ACCESS_KEY_SECRET}",
-                    "BUGLENS_ALIBABA_REGION_ID": "${BUGLENS_ALIBABA_REGION_ID}",
-                },
+                "url": "http://127.0.0.1:8000/mcp",
             }
         }
     }
     codex_mcp = {
         "mcpServers": {
             "buglens": {
-                "command": "buglens-mcp",
-                "env": {
-                    "GITLAB_URL": "${GITLAB_URL}",
-                    "GITLAB_TOKEN": "${GITLAB_TOKEN}",
-                },
+                "url": "http://127.0.0.1:8000/mcp",
             }
         }
     }
