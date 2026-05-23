@@ -86,6 +86,14 @@ openclaw skills install ./dist/openclaw-skills/buglens
 
 Codex can also consume the same folder as a project/local skill source in environments where local skill directories are enabled.
 
+Build a full third-party bundle (skill + runtime wheel + MCP config templates):
+
+```bash
+uv run buglens skills release --output ./dist/release-bundle
+```
+
+This is the recommended path for environments that do not have buglens source code.
+
 ## MCP tools (recommended integration backbone)
 
 Run MCP server:
