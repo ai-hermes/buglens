@@ -4,6 +4,8 @@ import argparse
 import inspect
 import logging
 import os
+import time
+from typing import Any
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -15,7 +17,9 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised in envs witho
 else:
     _MCP_IMPORT_ERROR = None
 
-from .config import bootstrap_process_env_from_dotenv
+from .config import SubAgentConfig, bootstrap_process_env_from_dotenv
+from .monitoring import ARMSClient, AtomicMonitoringService, SLSClient
+from .monitoring.query_builder import build_rum_search_query, resolve_time_range
 from .integrations.gitlab import (
     GitLabError,
     cancel_pipeline,
@@ -73,13 +77,15 @@ def _debug_preview(value: object, max_chars: int = 800) -> str:
 def _registered_tool_names() -> list[str]:
     names: list[str] = []
     for name, fn in inspect.getmembers(inspect.getmodule(_registered_tool_names), inspect.isfunction):
-        if fn.__module__ == __name__ and name.startswith("gitlab_"):
+        if fn.__module__ == __name__ and (
+            name.startswith("gitlab_") or name.startswith("arms_")
+        ):
             names.append(name)
     return sorted(names)
 
 
 class _NoopMCP:
-    def tool(self):
+    def tool(self, *args, **kwargs):
         def _decorator(fn):
             return fn
 
@@ -91,7 +97,7 @@ class _NoopMCP:
         ) from _MCP_IMPORT_ERROR
 
 
-mcp = FastMCP("buglens-mcp") if FastMCP is not None else _NoopMCP()
+mcp = FastMCP("buglens") if FastMCP is not None else _NoopMCP()
 
 
 def _gitlab_wrap(fn, **kwargs):
@@ -107,6 +113,77 @@ def _gitlab_wrap(fn, **kwargs):
     except GitLabError as exc:
         logger.warning("mcp tool_call_error tool=%s error=%s", fn.__name__, exc)
         return {"error": str(exc)}
+
+
+def _monitoring_wrap(fn, **kwargs):
+    logger.info("mcp tool_call_start tool=%s", fn.__name__)
+    logger.debug("mcp tool_call_input tool=%s kwargs=%s", fn.__name__, _debug_preview(kwargs))
+    started = time.monotonic()
+    try:
+        result = fn(**kwargs)
+        logger.info(
+            "mcp tool_call_complete tool=%s latency_ms=%d",
+            fn.__name__,
+            int((time.monotonic() - started) * 1000),
+        )
+        logger.debug(
+            "mcp tool_call_output tool=%s result=%s", fn.__name__, _debug_preview(result)
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("mcp tool_call_error tool=%s error=%s", fn.__name__, exc)
+        return {"error": str(exc)}
+
+
+def _build_monitoring_service() -> AtomicMonitoringService:
+    config = SubAgentConfig()
+    if not config.enable_mcp_tools:
+        raise RuntimeError("BUGLENS_ENABLE_MCP_TOOLS=false, monitoring tools are disabled.")
+    if not config.has_monitoring_credentials():
+        raise RuntimeError(
+            "Missing monitoring credentials: BUGLENS_ALIBABA_ACCESS_KEY_ID/SECRET/REGION_ID."
+        )
+
+    sls = SLSClient(
+        access_key_id=str(config.alibaba_access_key_id),
+        access_key_secret=str(config.alibaba_access_key_secret),
+        security_token=config.alibaba_security_token,
+        region_id=str(config.alibaba_region_id),
+        endpoint=config.sls_endpoint,
+        max_retries=config.monitoring_max_retries,
+        base_backoff_seconds=config.monitoring_base_backoff_seconds,
+        max_backoff_seconds=config.monitoring_max_backoff_seconds,
+        max_concurrency=config.monitoring_max_concurrency,
+    )
+    arms_kwargs: dict[str, Any] = {
+        "access_key_id": str(config.alibaba_access_key_id),
+        "access_key_secret": str(config.alibaba_access_key_secret),
+        "security_token": config.alibaba_security_token,
+        "region_id": str(config.alibaba_region_id),
+        "max_retries": config.monitoring_max_retries,
+        "base_backoff_seconds": config.monitoring_base_backoff_seconds,
+        "max_backoff_seconds": config.monitoring_max_backoff_seconds,
+        "max_concurrency": config.monitoring_max_concurrency,
+    }
+    if config.arms_endpoint:
+        arms_kwargs["endpoint"] = config.arms_endpoint
+    arms = ARMSClient(**arms_kwargs)
+    return AtomicMonitoringService(sls_client=sls, arms_client=arms)
+
+
+def _resolve_rum_sls_target(
+    *,
+    project: str | None,
+    logstore: str | None,
+    config: SubAgentConfig,
+) -> tuple[str, str]:
+    final_project = project or config.rum_sls_project
+    final_logstore = logstore or config.rum_sls_logstore
+    if not final_project or not final_logstore:
+        raise ValueError(
+            "RUM queries require project/logstore (set params or BUGLENS_RUM_SLS_PROJECT/BUGLENS_RUM_SLS_LOGSTORE)."
+        )
+    return str(final_project), str(final_logstore)
 
 
 @mcp.tool()
@@ -484,6 +561,197 @@ def gitlab_update_label(
 def gitlab_delete_label(name: str, project_id: str | None = None) -> dict:
     """Delete project label by name."""
     return _gitlab_wrap(delete_label, name=name, project_id=project_id)
+
+
+@mcp.tool()
+def arms_rum_list_apps(page_token: str | None = None, page_size: int = 100) -> dict:
+    """List ARMS RUM apps with normalized fields."""
+
+    def _call() -> dict:
+        monitoring = _build_monitoring_service()
+        result = monitoring.arms_list_rum_apps(
+            page_token=page_token,
+            page_size=page_size,
+        )
+        return result.model_dump(mode="json", exclude_none=True)
+
+    return _monitoring_wrap(_call)
+
+
+@mcp.tool()
+def arms_rum_search_errors(
+    project: str | None = None,
+    logstore: str | None = None,
+    last: str | None = None,
+    time_from_ms: int | None = None,
+    time_to_ms: int | None = None,
+    query: str | None = None,
+    event_type: str = "exception",
+    app_id: str | None = None,
+    app_types: list[str] | None = None,
+    exception_message: str | None = None,
+    keyword: str | None = None,
+    page_token: str | None = None,
+    page_size: int = 50,
+    reverse: bool = True,
+) -> dict:
+    """Search ARMS frontend (RUM) errors by structured filters or raw query."""
+
+    def _call() -> dict:
+        config = SubAgentConfig()
+        monitoring = _build_monitoring_service()
+        final_project, final_logstore = _resolve_rum_sls_target(
+            project=project,
+            logstore=logstore,
+            config=config,
+        )
+        from_ms, to_ms = resolve_time_range(from_ms=time_from_ms, to_ms=time_to_ms, last=last)
+        resolved_query = build_rum_search_query(
+            query=query,
+            event_type=event_type,
+            app_id=app_id,
+            app_types=app_types,
+            exception_message=exception_message,
+            keyword=keyword,
+        )
+        result = monitoring.sls_search_logs(
+            project=final_project,
+            logstore=final_logstore,
+            time_from_ms=from_ms,
+            time_to_ms=to_ms,
+            page_token=page_token,
+            page_size=page_size,
+            reverse=reverse,
+            extra_query={"query": resolved_query},
+        )
+        payload = result.model_dump(mode="json", exclude_none=True)
+        payload["query"] = resolved_query
+        return payload
+
+    return _monitoring_wrap(_call)
+
+
+@mcp.tool()
+def arms_rum_get_error_context(
+    pack_id: str,
+    pack_meta: str,
+    project: str | None = None,
+    logstore: str | None = None,
+    back_lines: int = 30,
+    forward_lines: int = 30,
+) -> dict:
+    """Get ARMS/SLS error context lines around a log pack record."""
+
+    def _call() -> dict:
+        config = SubAgentConfig()
+        monitoring = _build_monitoring_service()
+        final_project, final_logstore = _resolve_rum_sls_target(
+            project=project,
+            logstore=logstore,
+            config=config,
+        )
+        result = monitoring.sls_get_log_context(
+            project=final_project,
+            logstore=final_logstore,
+            pack_id=pack_id,
+            pack_meta=pack_meta,
+            back_lines=back_lines,
+            forward_lines=forward_lines,
+        )
+        return result.model_dump(mode="json", exclude_none=True)
+
+    return _monitoring_wrap(_call)
+
+
+@mcp.tool()
+def arms_rum_resolve_exception_stack(
+    pid: str,
+    line: int,
+    column: int,
+    sourcemap_type: str = "js",
+    exception_binary_images: str | None = None,
+) -> dict:
+    """Resolve frontend exception stack with source map by pid + line + column."""
+
+    def _call() -> dict:
+        monitoring = _build_monitoring_service()
+        result = monitoring.arms_resolve_exception_stack(
+            pid=pid,
+            line=line,
+            column=column,
+            sourcemap_type=sourcemap_type,
+            exception_binary_images=exception_binary_images,
+        )
+        payload = result.model_dump(mode="json", exclude_none=True)
+        payload["exception_stack"] = f"{line},{column},20"
+        return payload
+
+    return _monitoring_wrap(_call)
+
+
+@mcp.tool()
+def arms_exception_stack_tool(
+    pid: str,
+    line: int,
+    column: int,
+    sourcemap_type: str = "js",
+    exception_binary_images: str | None = None,
+) -> dict:
+    """Compatibility alias of arms_rum_resolve_exception_stack."""
+    return arms_rum_resolve_exception_stack(
+        pid=pid,
+        line=line,
+        column=column,
+        sourcemap_type=sourcemap_type,
+        exception_binary_images=exception_binary_images,
+    )
+
+
+@mcp.tool()
+def arms_get_error_detail(
+    app: str | None = None,
+    page: str | None = None,
+    version: str | None = None,
+    error_message: str | None = None,
+    project: str | None = None,
+    logstore: str | None = None,
+    time_from_ms: int | None = None,
+    time_to_ms: int | None = None,
+    query: str | None = None,
+    page_size: int = 20,
+) -> dict:
+    """Get detailed error logs by app/page/version/message filters."""
+
+    def _call() -> dict:
+        config = SubAgentConfig()
+        monitoring = _build_monitoring_service()
+        final_project, final_logstore = _resolve_rum_sls_target(
+            project=project,
+            logstore=logstore,
+            config=config,
+        )
+        from_ms, to_ms = resolve_time_range(from_ms=time_from_ms, to_ms=time_to_ms, last=None)
+        query_parts: list[str] = []
+        for value in (app, page, version, error_message):
+            if value:
+                query_parts.append(str(value))
+        if query:
+            query_parts.append(str(query))
+        resolved_query = " and ".join(query_parts) if query_parts else "*"
+        result = monitoring.sls_search_logs(
+            project=final_project,
+            logstore=final_logstore,
+            time_from_ms=from_ms,
+            time_to_ms=to_ms,
+            page_size=page_size,
+            reverse=True,
+            extra_query={"query": resolved_query},
+        )
+        payload = result.model_dump(mode="json", exclude_none=True)
+        payload["query"] = resolved_query
+        return payload
+
+    return _monitoring_wrap(_call)
 
 
 def main() -> None:

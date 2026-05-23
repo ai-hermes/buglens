@@ -129,6 +129,10 @@ Exposed tools:
 - GitLab Issues: `gitlab_list_issues`, `gitlab_get_issue`, `gitlab_create_issue`, `gitlab_update_issue`, `gitlab_create_issue_note`, `gitlab_list_issue_notes`
 - GitLab Pipelines/Jobs: `gitlab_list_pipelines`, `gitlab_get_pipeline`, `gitlab_retry_pipeline`, `gitlab_cancel_pipeline`, `gitlab_list_pipeline_jobs`, `gitlab_get_job_log`
 - GitLab Labels: `gitlab_list_labels`, `gitlab_create_label`, `gitlab_update_label`, `gitlab_delete_label`
+- ARMS/RUM: `arms_rum_list_apps`, `arms_rum_search_errors`, `arms_rum_get_error_context`, `arms_rum_resolve_exception_stack`, `arms_exception_stack_tool`, `arms_get_error_detail`
+
+When referenced from OpenClaw MCP tool namespace, use `mcp:<server-name>/<tool-name>`.
+Example: `mcp:buglens/gitlab_list_projects`.
 
 LangGraph built-in tools (used by `buglens` runtime):
 
