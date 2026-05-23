@@ -7,8 +7,10 @@ import os
 
 try:
     from mcp.server.fastmcp import FastMCP
+    from mcp.server.transport_security import TransportSecuritySettings
 except ModuleNotFoundError as exc:  # pragma: no cover - exercised in envs without mcp
     FastMCP = None  # type: ignore[assignment]
+    TransportSecuritySettings = None  # type: ignore[assignment]
     _MCP_IMPORT_ERROR = exc
 else:
     _MCP_IMPORT_ERROR = None
@@ -83,7 +85,7 @@ class _NoopMCP:
 
         return _decorator
 
-    def run(self) -> None:
+    def run(self, *args, **kwargs) -> None:
         raise ModuleNotFoundError(
             "Missing optional dependency 'mcp'. Install it to run buglens-mcp."
         ) from _MCP_IMPORT_ERROR
@@ -492,6 +494,51 @@ def main() -> None:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="logging level (logs write to stderr)",
     )
+    parser.add_argument(
+        "--transport",
+        default=os.getenv("BUGLENS_MCP_TRANSPORT", "stdio"),
+        choices=["stdio", "streamable-http"],
+        help="MCP transport mode. Use streamable-http for remote URL integration.",
+    )
+    parser.add_argument(
+        "--host",
+        default=os.getenv("BUGLENS_MCP_HOST", "127.0.0.1"),
+        help="HTTP bind host when --transport=streamable-http",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("BUGLENS_MCP_PORT", "8000")),
+        help="HTTP bind port when --transport=streamable-http",
+    )
+    parser.add_argument(
+        "--streamable-path",
+        default=os.getenv("BUGLENS_MCP_STREAMABLE_HTTP_PATH", "/mcp"),
+        help="HTTP path for streamable MCP endpoint when --transport=streamable-http",
+    )
+    parser.add_argument(
+        "--allow-host",
+        action="append",
+        default=None,
+        help=(
+            "Allowed Host header (repeatable, e.g. 10.37.25.80:*). "
+            "If omitted with non-local host, DNS rebinding protection is disabled."
+        ),
+    )
+    parser.add_argument(
+        "--allow-origin",
+        action="append",
+        default=None,
+        help=(
+            "Allowed Origin header (repeatable, e.g. http://10.37.25.80:*). "
+            "Used when DNS rebinding protection is enabled."
+        ),
+    )
+    parser.add_argument(
+        "--disable-dns-rebinding-protection",
+        action="store_true",
+        help="Disable DNS rebinding protection for streamable-http transport.",
+    )
     args = parser.parse_args()
     _configure_logging(args.log_level)
 
@@ -499,14 +546,46 @@ def main() -> None:
     bootstrap_process_env_from_dotenv()
     tool_names = _registered_tool_names()
     logger.info(
-        "starting mcp server name=buglens-mcp tools=%d mcp_installed=%s gitlab_url_set=%s gitlab_token_set=%s",
+        "starting mcp server name=buglens-mcp tools=%d mcp_installed=%s gitlab_url_set=%s gitlab_token_set=%s transport=%s",
         len(tool_names),
         FastMCP is not None,
         bool(os.getenv("GITLAB_URL")),
         bool(os.getenv("GITLAB_TOKEN")),
+        args.transport,
     )
     logger.debug("registered tools=%s", tool_names)
-    mcp.run()
+    if args.transport == "streamable-http":
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+        mcp.settings.streamable_http_path = args.streamable_path
+        is_local_bind = args.host in {"127.0.0.1", "localhost", "::1"}
+        if args.disable_dns_rebinding_protection:
+            mcp.settings.transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=False
+            )
+            logger.warning("DNS rebinding protection disabled by CLI flag.")
+        elif args.allow_host:
+            mcp.settings.transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=args.allow_host,
+                allowed_origins=args.allow_origin or [],
+            )
+        elif not is_local_bind:
+            mcp.settings.transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=False
+            )
+            logger.warning(
+                "non-local bind host=%s without --allow-host; disabling DNS rebinding protection "
+                "to avoid Invalid Host header errors.",
+                args.host,
+            )
+        logger.info(
+            "streamable endpoint ready url=http://%s:%d%s",
+            args.host,
+            args.port,
+            args.streamable_path,
+        )
+    mcp.run(transport=args.transport)
 
 
 if __name__ == "__main__":

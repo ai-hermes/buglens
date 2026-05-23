@@ -9,13 +9,19 @@ Use a hybrid model:
 
 This is better than pure Skill-script mode because tool interfaces become stable and reusable across agents.
 
-## Mapping from existing skills
+## Mapping from `buglens` skill workflow
 
-`gitlab-frontend`:
+Monitoring phase:
 
-- `tools/find_page_code.py` -> `gitlab_find_page_code`
-- `tools/get_commits.py` -> `gitlab_get_commits`
-- `tools/create_issue.py` -> `gitlab_create_issue`
+- `arms_rum_search_errors`
+- `arms_rum_get_error_context`
+- `arms_get_error_detail`
+
+GitLab phase:
+
+- `gitlab_find_page_code`
+- `gitlab_get_commits`
+- `gitlab_create_issue`
 
 `project_id` can be passed per tool call; `GITLAB_PROJECT_ID` is only a default fallback.
 
@@ -32,4 +38,4 @@ Start MCP server:
 uv run buglens-mcp
 ```
 
-Register the MCP server in OpenClaw, then keep your two existing skills as thin workflow wrappers.
+Register the MCP server in OpenClaw, then keep your `buglens` skill as a thin workflow wrapper.

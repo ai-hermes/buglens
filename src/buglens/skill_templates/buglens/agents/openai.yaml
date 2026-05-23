@@ -1,0 +1,4 @@
+interface:
+  display_name: buglens
+  short_description: Diagnose frontend incidents via ARMS/RUM and GitLab MCP workflows.
+  default_prompt: Diagnose this frontend incident with buglens and provide owner-ready issue content.

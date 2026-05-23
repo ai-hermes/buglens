@@ -6,12 +6,14 @@ import json
 import logging
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from .agent import SubAgent
 from .config import bootstrap_process_env_from_dotenv
 from .models import InvokeRequest
 from .rpc import build_error, dispatch_request
+from .skills import export_skill, release_bundle
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +230,47 @@ def main() -> None:
         help="stream assistant text output in REPL invoke",
     )
 
+    skills_parser = sub.add_parser("skills", help="skill packaging helpers")
+    skills_sub = skills_parser.add_subparsers(dest="skills_mode")
+    skills_export_parser = skills_sub.add_parser(
+        "export",
+        help="export packaged skill templates for local distribution",
+    )
+    skills_export_parser.add_argument(
+        "--output",
+        default="./dist/openclaw-skills",
+        help="target directory for exported buglens skill",
+    )
+    skills_export_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace existing target skill directories",
+    )
+    skills_release_parser = skills_sub.add_parser(
+        "release",
+        help="build runtime wheel and emit a distributable bundle",
+    )
+    skills_release_parser.add_argument(
+        "--output",
+        default="./dist/release-bundle",
+        help="target directory for release bundle output",
+    )
+    skills_release_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace existing bundle directory if present",
+    )
+    skills_release_parser.add_argument(
+        "--skip-build",
+        action="store_true",
+        help="skip wheel build and reuse latest wheel from ./dist",
+    )
+    skills_release_parser.add_argument(
+        "--wheel-path",
+        default=None,
+        help="optional explicit wheel path to include in release bundle",
+    )
+
     args = parser.parse_args()
     _configure_logging(args.log_level)
     if args.mode == "invoke":
@@ -244,6 +287,37 @@ def main() -> None:
         )
     if args.mode == "repl":
         raise SystemExit(asyncio.run(_run_repl(args.mock_response, args.stream)))
+    if args.mode == "skills":
+        if args.skills_mode == "export":
+            try:
+                result = export_skill(
+                    output_dir=Path(args.output),
+                    overwrite=args.overwrite,
+                )
+            except Exception as exc:
+                raise SystemExit(f"skills export failed: {exc}") from exc
+
+            print(f"exported skill: {result.exported_skill}")
+            print(f"output dir: {result.output_dir}")
+            print(f"openclaw skills install {result.output_dir / result.exported_skill}")
+            raise SystemExit(0)
+        if args.skills_mode == "release":
+            try:
+                result = release_bundle(
+                    output_dir=Path(args.output),
+                    overwrite=args.overwrite,
+                    skip_build=args.skip_build,
+                    wheel_path=Path(args.wheel_path) if args.wheel_path else None,
+                )
+            except Exception as exc:
+                raise SystemExit(f"skills release failed: {exc}") from exc
+
+            print(f"release bundle: {result.bundle_dir}")
+            print(f"skill path: {result.skill_dir}")
+            print(f"wheel: {result.wheel_path}")
+            print(f"install guide: {result.install_doc}")
+            raise SystemExit(0)
+        raise SystemExit("missing skills subcommand, expected: export | release")
     raise SystemExit(asyncio.run(_run_stdio_loop()))
 
 

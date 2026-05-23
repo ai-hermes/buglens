@@ -65,12 +65,61 @@ Expected methods:
 - `invoke`
 - `shutdown`
 
+## Skill mode (Codex + OpenClaw)
+
+This repo now ships a unified `buglens` skill package under `skills/buglens`:
+
+- `SKILL.md`: orchestration contract (frontend incident diagnosis -> GitLab issue workflow)
+- `agents/openai.yaml`: Codex-facing UI metadata (`display_name`, `short_description`, `default_prompt`)
+
+Export local distribution artifacts:
+
+```bash
+uv run buglens skills export --output ./dist/openclaw-skills
+```
+
+Install into OpenClaw from local directory:
+
+```bash
+openclaw skills install ./dist/openclaw-skills/buglens
+```
+
+Codex can also consume the same folder as a project/local skill source in environments where local skill directories are enabled.
+
+Build a full third-party bundle (skill + runtime wheel + MCP config templates):
+
+```bash
+uv run buglens skills release --output ./dist/release-bundle
+```
+
+This is the recommended path for environments that do not have buglens source code.
+
 ## MCP tools (recommended integration backbone)
 
 Run MCP server:
 
 ```bash
 uv run buglens-mcp
+```
+
+Run MCP server in streamable HTTP mode (recommended for remote/tool URL integration):
+
+```bash
+uv run buglens-mcp --transport streamable-http --host 0.0.0.0 --port 8000
+```
+
+Default streamable endpoint URL: `http://127.0.0.1:8000/mcp`
+
+If connecting from another machine and you hit `Invalid Host header`, add either:
+
+```bash
+uv run buglens-mcp --transport streamable-http --host 0.0.0.0 --port 8000 --allow-host 10.37.25.80:*
+```
+
+or (LAN testing):
+
+```bash
+uv run buglens-mcp --transport streamable-http --host 0.0.0.0 --port 8000 --disable-dns-rebinding-protection
 ```
 
 Exposed tools:
@@ -124,7 +173,7 @@ result = svc.sls_search_logs(
 )
 ```
 
-Recommended architecture for your two existing skills:
+Recommended architecture for the single external `buglens` skill:
 
 - Keep Skill as orchestration/prompt layer (parse alert card, generate report text).
 - Move executable capability to MCP tools (this repo now provides those tools).
