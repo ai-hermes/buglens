@@ -79,7 +79,7 @@ def _registered_tool_names() -> list[str]:
 
 
 class _NoopMCP:
-    def tool(self):
+    def tool(self, *args, **kwargs):
         def _decorator(fn):
             return fn
 
@@ -91,7 +91,7 @@ class _NoopMCP:
         ) from _MCP_IMPORT_ERROR
 
 
-mcp = FastMCP("buglens-mcp") if FastMCP is not None else _NoopMCP()
+mcp = FastMCP("buglens") if FastMCP is not None else _NoopMCP()
 
 
 def _gitlab_wrap(fn, **kwargs):

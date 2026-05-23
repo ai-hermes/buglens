@@ -130,3 +130,9 @@ def test_mcp_server_non_local_disables_dns_rebinding_by_default(monkeypatch) -> 
 
     assert dummy.called_transport == "streamable-http"
     assert dummy.settings.transport_security.enable_dns_rebinding_protection is False
+
+
+def test_registered_tool_names_are_unprefixed_for_mcp_scoped_naming() -> None:
+    names = mcp_server._registered_tool_names()
+    assert "gitlab_list_projects" in names
+    assert "buglens_gitlab_list_projects" not in names
