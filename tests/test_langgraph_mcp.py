@@ -151,6 +151,7 @@ def test_langgraph_monitoring_registry_contains_rum_tools() -> None:
     assert "arms_rum_list_apps" in names
     assert "arms_rum_search_errors" in names
     assert "arms_rum_resolve_exception_stack" in names
+    assert "arms_exception_stack_tool" in names
     assert "arms_get_error_detail" not in names
     assert "arms_rum_get_error_context" not in names
     assert "sls_search_logs" not in names
@@ -179,6 +180,13 @@ def test_langgraph_monitoring_registry_contains_rum_tools() -> None:
     assert "column" in stack_props
     assert "exception_binary_images" in stack_props
     assert stack_tool.parameters.get("required") == ["pid", "line", "column"]
+    stack_alias_tool = next(tool for tool in tools if tool.name == "arms_exception_stack_tool")
+    stack_alias_props = stack_alias_tool.parameters.get("properties", {})
+    assert "pid" in stack_alias_props
+    assert "line" in stack_alias_props
+    assert "column" in stack_alias_props
+    assert "exception_binary_images" in stack_alias_props
+    assert stack_alias_tool.parameters.get("required") == ["pid", "line", "column"]
 
 
 async def test_langgraph_runner_stream_fallback_no_duplicate(monkeypatch) -> None:
@@ -208,6 +216,70 @@ async def test_langgraph_runner_stream_fallback_no_duplicate(monkeypatch) -> Non
 
     assert result.output == "streamed answer"
     assert chunks == ["streamed answer"]
+
+
+async def test_langgraph_runner_emits_tool_trace_when_enabled(monkeypatch) -> None:
+    runner = LangGraphRunner()
+    config = SubAgentConfig.model_validate(
+        {
+            "runner": "langgraph",
+            "anthropic_base_url": "https://example.local",
+            "anthropic_api_key": "token",
+            "anthropic_model": "deepseek-v3.2",
+            "show_tool_call_trace": True,
+            "mcp_tool_call_max_steps": 3,
+            "max_turns": 3,
+        }
+    )
+
+    responses = [
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "gitlab_list_projects",
+                                    "arguments": '{"search":"buglens"}',
+                                },
+                            }
+                        ],
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 1},
+        },
+        {
+            "choices": [{"message": {"content": "final answer"}}],
+            "usage": {"prompt_tokens": 2},
+        },
+    ]
+
+    async def fake_call_litellm_json(_messages, _config, _tools):
+        return responses.pop(0)
+
+    async def fake_execute_tool_call(_tool_map, _tool_call):
+        return "call-1", '{"projects":[{"id":1,"name":"buglens"}]}'
+
+    monkeypatch.setattr(runner, "_call_litellm_json", fake_call_litellm_json)
+    monkeypatch.setattr(runner, "_execute_tool_call", fake_execute_tool_call)
+
+    chunks: list[str] = []
+    result = await runner.run(
+        InvokeRequest(task="diagnose gitlab project"),
+        config,
+        on_text=chunks.append,
+    )
+
+    joined = "".join(chunks)
+    assert result.output == "final answer"
+    assert "[tool-call] gitlab_list_projects" in joined
+    assert "[tool-output] gitlab_list_projects" in joined
+    assert joined.endswith("final answer")
 
 
 async def test_langgraph_runner_skips_gitlab_tools_for_non_gitlab_task(monkeypatch) -> None:

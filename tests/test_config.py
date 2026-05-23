@@ -44,6 +44,7 @@ def test_config_defaults_for_mcp_tools() -> None:
     config = SubAgentConfig()
     assert config.enable_mcp_tools is True
     assert config.mcp_tool_call_max_steps == 6
+    assert config.show_tool_call_trace is False
     assert config.monitoring_max_retries == 2
     assert config.monitoring_max_concurrency == 4
 
