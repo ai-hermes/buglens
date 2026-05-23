@@ -100,7 +100,25 @@ Typical trigger examples:
 Start MCP server when needed:
 
 ```bash
-uv run buglens-mcp
+uv run buglens-mcp --transport streamable-http --host 0.0.0.0 --port 8000
+```
+
+Default streamable endpoint:
+
+```text
+http://127.0.0.1:8000/mcp
+```
+
+If client runs from another machine and you see `Invalid Host header`, either:
+
+```bash
+uv run buglens-mcp --transport streamable-http --host 0.0.0.0 --port 8000 --allow-host 10.37.25.80:*
+```
+
+or (less strict, easier for LAN testing):
+
+```bash
+uv run buglens-mcp --transport streamable-http --host 0.0.0.0 --port 8000 --disable-dns-rebinding-protection
 ```
 
 If tool calls fail, check env loading with:
