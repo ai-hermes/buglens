@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import argparse
+import inspect
+import logging
+import os
+
 try:
     from mcp.server.fastmcp import FastMCP
 except ModuleNotFoundError as exc:  # pragma: no cover - exercised in envs without mcp
@@ -45,6 +50,32 @@ from .integrations.gitlab import (
     update_merge_request,
 )
 
+logger = logging.getLogger(__name__)
+
+
+def _configure_logging(log_level: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
+
+
+def _debug_preview(value: object, max_chars: int = 800) -> str:
+    text = repr(value)
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}...(truncated)"
+
+
+def _registered_tool_names() -> list[str]:
+    names: list[str] = []
+    for name, fn in inspect.getmembers(inspect.getmodule(_registered_tool_names), inspect.isfunction):
+        if fn.__module__ == __name__ and name.startswith("gitlab_"):
+            names.append(name)
+    return sorted(names)
+
+
 class _NoopMCP:
     def tool(self):
         def _decorator(fn):
@@ -62,9 +93,17 @@ mcp = FastMCP("buglens-mcp") if FastMCP is not None else _NoopMCP()
 
 
 def _gitlab_wrap(fn, **kwargs):
+    logger.info("mcp tool_call_start tool=%s", fn.__name__)
+    logger.debug("mcp tool_call_input tool=%s kwargs=%s", fn.__name__, _debug_preview(kwargs))
     try:
-        return fn(**kwargs)
+        result = fn(**kwargs)
+        logger.info("mcp tool_call_complete tool=%s", fn.__name__)
+        logger.debug(
+            "mcp tool_call_output tool=%s result=%s", fn.__name__, _debug_preview(result)
+        )
+        return result
     except GitLabError as exc:
+        logger.warning("mcp tool_call_error tool=%s error=%s", fn.__name__, exc)
         return {"error": str(exc)}
 
 
@@ -446,7 +485,27 @@ def gitlab_delete_label(name: str, project_id: str | None = None) -> dict:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="buglens MCP server")
+    parser.add_argument(
+        "--log-level",
+        default=os.getenv("BUGLENS_MCP_LOG_LEVEL", "INFO"),
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="logging level (logs write to stderr)",
+    )
+    args = parser.parse_args()
+    _configure_logging(args.log_level)
+
+    logger.info("bootstrapping dotenv for mcp server")
     bootstrap_process_env_from_dotenv()
+    tool_names = _registered_tool_names()
+    logger.info(
+        "starting mcp server name=buglens-mcp tools=%d mcp_installed=%s gitlab_url_set=%s gitlab_token_set=%s",
+        len(tool_names),
+        FastMCP is not None,
+        bool(os.getenv("GITLAB_URL")),
+        bool(os.getenv("GITLAB_TOKEN")),
+    )
+    logger.debug("registered tools=%s", tool_names)
     mcp.run()
 
 
