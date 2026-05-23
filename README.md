@@ -139,6 +139,7 @@ Copy `.env.example` and set fields as needed:
 - `BUGLENS_LLM_PROVIDER` (default `litellm`)
 - `BUGLENS_ENABLE_MCP_TOOLS` (default `true`; enable built-in GitLab + monitoring tools on `langgraph` runner)
 - `BUGLENS_MCP_TOOL_CALL_MAX_STEPS` (default `6`; max auto tool-call rounds per invoke)
+- `BUGLENS_SHOW_TOOL_CALL_TRACE` (default `false`; when stream output is enabled, print tool call args and tool outputs)
 - `BUGLENS_SYSTEM_PROMPT`
 - `BUGLENS_MAX_TURNS`
 - `BUGLENS_TIMEOUT_SECONDS`

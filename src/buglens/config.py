@@ -52,6 +52,7 @@ class SubAgentConfig(BaseSettings):
     llm_provider: Literal["litellm"] = "litellm"
     enable_mcp_tools: bool = True
     mcp_tool_call_max_steps: int = Field(default=6, ge=1, le=30)
+    show_tool_call_trace: bool = False
     model: str = "deepseek-v3.2"
     system_prompt: str | None = None
     max_turns: int = Field(default=6, ge=1, le=100)

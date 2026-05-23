@@ -142,6 +142,16 @@ class LangGraphRunner:
             return text
         return f"{text[:max_chars]}...(truncated)"
 
+    @staticmethod
+    def _normalize_tool_call_arguments(arguments_raw: Any) -> dict[str, Any]:
+        try:
+            arguments = json.loads(arguments_raw) if isinstance(arguments_raw, str) else {}
+        except json.JSONDecodeError:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            return {}
+        return arguments
+
     def _should_enable_gitlab_tools(self, request: InvokeRequest) -> bool:
         task_blob = request.task
         if request.context:
@@ -771,6 +781,22 @@ class LangGraphRunner:
                 },
                 handler=_arms_rum_resolve_exception_stack,
             ),
+            MCPTool(
+                name="arms_exception_stack_tool",
+                description="Resolve frontend exception stack using source map by pid + line + column.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "pid": {"type": "string"},
+                        "line": {"type": "integer"},
+                        "column": {"type": "integer"},
+                        "sourcemap_type": {"type": "string"},
+                        "exception_binary_images": {"type": "string"},
+                    },
+                    "required": ["pid", "line", "column"],
+                },
+                handler=_arms_rum_resolve_exception_stack,
+            ),
         ]
 
     async def _discover_external_mcp_tools(self, config: SubAgentConfig) -> list[MCPTool]:
@@ -1103,12 +1129,7 @@ class LangGraphRunner:
             return call_id, json.dumps(payload, ensure_ascii=False)
 
         arguments_raw = tool_call.get("function", {}).get("arguments", "{}")
-        try:
-            arguments = json.loads(arguments_raw) if isinstance(arguments_raw, str) else {}
-        except json.JSONDecodeError:
-            arguments = {}
-        if not isinstance(arguments, dict):
-            arguments = {}
+        arguments = self._normalize_tool_call_arguments(arguments_raw)
 
         logger.info("LangGraph tool_call_start name=%s call_id=%s", tool_name, call_id)
         logger.debug(
@@ -1242,7 +1263,25 @@ class LangGraphRunner:
 
                 if tool_calls and tools:
                     for tool_call in tool_calls:
+                        tool_name = str(tool_call.get("function", {}).get("name", ""))
+                        if on_text is not None and config.show_tool_call_trace:
+                            arguments = self._normalize_tool_call_arguments(
+                                tool_call.get("function", {}).get("arguments", "{}")
+                            )
+                            on_text(
+                                f"\n[tool-call] {tool_name} args="
+                                f"{self._debug_preview(arguments, max_chars=800)}\n"
+                            )
                         call_id, tool_output = await self._execute_tool_call(tool_map, tool_call)
+                        if on_text is not None and config.show_tool_call_trace:
+                            try:
+                                tool_output_obj: Any = json.loads(tool_output)
+                            except json.JSONDecodeError:
+                                tool_output_obj = tool_output
+                            on_text(
+                                f"[tool-output] {tool_name} result="
+                                f"{self._debug_preview(tool_output_obj, max_chars=1200)}\n"
+                            )
                         local_messages.append(
                             {
                                 "role": "tool",
